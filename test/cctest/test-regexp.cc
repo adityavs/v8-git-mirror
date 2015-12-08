@@ -25,62 +25,66 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+// TODO(mythria): Remove this define after this flag is turned on globally
+#define V8_IMMINENT_DEPRECATION_WARNINGS
+
 #include <cstdlib>
 #include <sstream>
 
 #include "src/v8.h"
 
-#include "src/ast.h"
+#include "src/ast/ast.h"
 #include "src/char-predicates-inl.h"
-#include "src/jsregexp.h"
 #include "src/ostreams.h"
-#include "src/parser.h"
-#include "src/regexp-macro-assembler.h"
-#include "src/regexp-macro-assembler-irregexp.h"
+#include "src/parsing/parser.h"
+#include "src/regexp/jsregexp.h"
+#include "src/regexp/regexp-macro-assembler.h"
+#include "src/regexp/regexp-macro-assembler-irregexp.h"
+#include "src/splay-tree-inl.h"
 #include "src/string-stream.h"
 #ifdef V8_INTERPRETED_REGEXP
-#include "src/interpreter-irregexp.h"
+#include "src/regexp/interpreter-irregexp.h"
 #else  // V8_INTERPRETED_REGEXP
 #include "src/macro-assembler.h"
 #if V8_TARGET_ARCH_ARM
 #include "src/arm/assembler-arm.h"  // NOLINT
 #include "src/arm/macro-assembler-arm.h"
-#include "src/arm/regexp-macro-assembler-arm.h"
+#include "src/regexp/arm/regexp-macro-assembler-arm.h"
 #endif
 #if V8_TARGET_ARCH_ARM64
 #include "src/arm64/assembler-arm64.h"
 #include "src/arm64/macro-assembler-arm64.h"
-#include "src/arm64/regexp-macro-assembler-arm64.h"
+#include "src/regexp/arm64/regexp-macro-assembler-arm64.h"
 #endif
 #if V8_TARGET_ARCH_PPC
 #include "src/ppc/assembler-ppc.h"
 #include "src/ppc/macro-assembler-ppc.h"
-#include "src/ppc/regexp-macro-assembler-ppc.h"
+#include "src/regexp/ppc/regexp-macro-assembler-ppc.h"
 #endif
 #if V8_TARGET_ARCH_MIPS
 #include "src/mips/assembler-mips.h"
 #include "src/mips/macro-assembler-mips.h"
-#include "src/mips/regexp-macro-assembler-mips.h"
+#include "src/regexp/mips/regexp-macro-assembler-mips.h"
 #endif
 #if V8_TARGET_ARCH_MIPS64
 #include "src/mips64/assembler-mips64.h"
 #include "src/mips64/macro-assembler-mips64.h"
-#include "src/mips64/regexp-macro-assembler-mips64.h"
+#include "src/regexp/mips64/regexp-macro-assembler-mips64.h"
 #endif
 #if V8_TARGET_ARCH_X64
+#include "src/regexp/x64/regexp-macro-assembler-x64.h"
 #include "src/x64/assembler-x64.h"
 #include "src/x64/macro-assembler-x64.h"
-#include "src/x64/regexp-macro-assembler-x64.h"
 #endif
 #if V8_TARGET_ARCH_IA32
 #include "src/ia32/assembler-ia32.h"
 #include "src/ia32/macro-assembler-ia32.h"
-#include "src/ia32/regexp-macro-assembler-ia32.h"
+#include "src/regexp/ia32/regexp-macro-assembler-ia32.h"
 #endif
 #if V8_TARGET_ARCH_X87
+#include "src/regexp/x87/regexp-macro-assembler-x87.h"
 #include "src/x87/assembler-x87.h"
 #include "src/x87/macro-assembler-x87.h"
-#include "src/x87/regexp-macro-assembler-x87.h"
 #endif
 #endif  // V8_INTERPRETED_REGEXP
 #include "test/cctest/cctest.h"
@@ -155,7 +159,10 @@ static MinMaxPair CheckMinMaxMatch(const char* input) {
     CHECK_EQ(max, min_max.max_match);                                          \
   }
 
-TEST(Parser) {
+
+void TestRegExpParser(bool lookbehind) {
+  FLAG_harmony_regexp_lookbehind = lookbehind;
+
   CHECK_PARSE_ERROR("?");
 
   CheckParseEq("abc", "'abc'");
@@ -187,6 +194,13 @@ TEST(Parser) {
   CheckParseEq("foo|(bar|baz)|quux", "(| 'foo' (^ (| 'bar' 'baz')) 'quux')");
   CheckParseEq("foo(?=bar)baz", "(: 'foo' (-> + 'bar') 'baz')");
   CheckParseEq("foo(?!bar)baz", "(: 'foo' (-> - 'bar') 'baz')");
+  if (lookbehind) {
+    CheckParseEq("foo(?<=bar)baz", "(: 'foo' (<- + 'bar') 'baz')");
+    CheckParseEq("foo(?<!bar)baz", "(: 'foo' (<- - 'bar') 'baz')");
+  } else {
+    CHECK_PARSE_ERROR("foo(?<=bar)baz");
+    CHECK_PARSE_ERROR("foo(?<!bar)baz");
+  }
   CheckParseEq("()", "(^ %)");
   CheckParseEq("(?=)", "(-> + %)");
   CheckParseEq("[]", "^[\\x00-\\uffff]");  // Doesn't compile on windows
@@ -263,9 +277,16 @@ TEST(Parser) {
   CheckParseEq("(?=a){1,10}a", "(: (-> + 'a') 'a')");
   CheckParseEq("(?=a){9,10}a", "(: (-> + 'a') 'a')");
   CheckParseEq("(?!a)?a", "'a'");
-  CheckParseEq("\\1(a)", "(^ 'a')");
+  CheckParseEq("\\1(a)", "(: (<- 1) (^ 'a'))");
   CheckParseEq("(?!(a))\\1", "(: (-> - (^ 'a')) (<- 1))");
-  CheckParseEq("(?!\\1(a\\1)\\1)\\1", "(: (-> - (: (^ 'a') (<- 1))) (<- 1))");
+  CheckParseEq("(?!\\1(a\\1)\\1)\\1",
+               "(: (-> - (: (<- 1) (^ 'a') (<- 1))) (<- 1))");
+  CheckParseEq("\\1\\2(a(?:\\1(b\\1\\2))\\2)\\1",
+               "(: (<- 1) (<- 2) (^ (: 'a' (^ 'b') (<- 2))) (<- 1))");
+  if (lookbehind) {
+    CheckParseEq("\\1\\2(a(?<=\\1(b\\1\\2))\\2)\\1",
+                 "(: (<- 1) (<- 2) (^ (: 'a' (<- + (^ 'b')) (<- 2))) (<- 1))");
+  }
   CheckParseEq("[\\0]", "[\\x00]");
   CheckParseEq("[\\11]", "[\\x09]");
   CheckParseEq("[\\11a]", "[\\x09 a]");
@@ -396,6 +417,16 @@ TEST(Parser) {
 }
 
 
+TEST(ParserWithLookbehind) {
+  TestRegExpParser(true);  // Lookbehind enabled.
+}
+
+
+TEST(ParserWithoutLookbehind) {
+  TestRegExpParser(true);  // Lookbehind enabled.
+}
+
+
 TEST(ParserRegression) {
   CheckParseEq("[A-Z$-][x]", "(! [A-Z $ -] [x])");
   CheckParseEq("a{3,4*}", "(: 'a{3,' (# 0 - g '4') '}')");
@@ -413,7 +444,7 @@ static void ExpectError(const char* input,
             CcTest::i_isolate(), &zone, &reader, false, false, &result));
   CHECK(result.tree == NULL);
   CHECK(!result.error.is_null());
-  SmartArrayPointer<char> str = result.error->ToCString(ALLOW_NULLS);
+  v8::base::SmartArrayPointer<char> str = result.error->ToCString(ALLOW_NULLS);
   CHECK_EQ(0, strcmp(expected, str.get()));
 }
 
@@ -714,7 +745,7 @@ class ContextInitializer {
   }
  private:
   v8::HandleScope scope_;
-  v8::Handle<v8::Context> env_;
+  v8::Local<v8::Context> env_;
 };
 
 
@@ -786,7 +817,7 @@ TEST(MacroAssemblerNativeSimple) {
 
   Label fail, backtrack;
   m.PushBacktrack(&fail);
-  m.CheckNotAtStart(NULL);
+  m.CheckNotAtStart(0, NULL);
   m.LoadCurrentCharacter(2, NULL);
   m.CheckNotCharacter('o', NULL);
   m.LoadCurrentCharacter(1, NULL, false);
@@ -853,7 +884,7 @@ TEST(MacroAssemblerNativeSimpleUC16) {
 
   Label fail, backtrack;
   m.PushBacktrack(&fail);
-  m.CheckNotAtStart(NULL);
+  m.CheckNotAtStart(0, NULL);
   m.LoadCurrentCharacter(2, NULL);
   m.CheckNotCharacter('o', NULL);
   m.LoadCurrentCharacter(1, NULL, false);
@@ -969,12 +1000,12 @@ TEST(MacroAssemblerNativeBackReferenceLATIN1) {
   m.AdvanceCurrentPosition(2);
   m.WriteCurrentPositionToRegister(1, 0);
   Label nomatch;
-  m.CheckNotBackReference(0, &nomatch);
+  m.CheckNotBackReference(0, false, &nomatch);
   m.Fail();
   m.Bind(&nomatch);
   m.AdvanceCurrentPosition(2);
   Label missing_match;
-  m.CheckNotBackReference(0, &missing_match);
+  m.CheckNotBackReference(0, false, &missing_match);
   m.WriteCurrentPositionToRegister(2, 0);
   m.Succeed();
   m.Bind(&missing_match);
@@ -1019,12 +1050,12 @@ TEST(MacroAssemblerNativeBackReferenceUC16) {
   m.AdvanceCurrentPosition(2);
   m.WriteCurrentPositionToRegister(1, 0);
   Label nomatch;
-  m.CheckNotBackReference(0, &nomatch);
+  m.CheckNotBackReference(0, false, &nomatch);
   m.Fail();
   m.Bind(&nomatch);
   m.AdvanceCurrentPosition(2);
   Label missing_match;
-  m.CheckNotBackReference(0, &missing_match);
+  m.CheckNotBackReference(0, false, &missing_match);
   m.WriteCurrentPositionToRegister(2, 0);
   m.Succeed();
   m.Bind(&missing_match);
@@ -1069,7 +1100,7 @@ TEST(MacroAssemblernativeAtStart) {
                              0);
 
   Label not_at_start, newline, fail;
-  m.CheckNotAtStart(&not_at_start);
+  m.CheckNotAtStart(0, &not_at_start);
   // Check that prevchar = '\n' and current = 'f'.
   m.CheckCharacter('\n', &newline);
   m.Bind(&fail);
@@ -1134,16 +1165,16 @@ TEST(MacroAssemblerNativeBackRefNoCase) {
   m.WriteCurrentPositionToRegister(2, 0);
   m.AdvanceCurrentPosition(3);
   m.WriteCurrentPositionToRegister(3, 0);
-  m.CheckNotBackReferenceIgnoreCase(2, &fail);  // Match "AbC".
-  m.CheckNotBackReferenceIgnoreCase(2, &fail);  // Match "ABC".
+  m.CheckNotBackReferenceIgnoreCase(2, false, &fail);  // Match "AbC".
+  m.CheckNotBackReferenceIgnoreCase(2, false, &fail);  // Match "ABC".
   Label expected_fail;
-  m.CheckNotBackReferenceIgnoreCase(2, &expected_fail);
+  m.CheckNotBackReferenceIgnoreCase(2, false, &expected_fail);
   m.Bind(&fail);
   m.Fail();
 
   m.Bind(&expected_fail);
   m.AdvanceCurrentPosition(3);  // Skip "xYz"
-  m.CheckNotBackReferenceIgnoreCase(2, &succ);
+  m.CheckNotBackReferenceIgnoreCase(2, false, &succ);
   m.Fail();
 
   m.Bind(&succ);
@@ -1335,7 +1366,7 @@ TEST(MacroAssemblerNativeLotsOfRegisters) {
   m.WriteCurrentPositionToRegister(0, 0);
   m.WriteCurrentPositionToRegister(1, 1);
   Label done;
-  m.CheckNotBackReference(0, &done);  // Performs a system-stack push.
+  m.CheckNotBackReference(0, false, &done);  // Performs a system-stack push.
   m.Bind(&done);
   m.PushRegister(large_number, RegExpMacroAssembler::kNoStackLimitCheck);
   m.PopRegister(1);
@@ -1384,7 +1415,7 @@ TEST(MacroAssembler) {
   m.Fail();
   m.Bind(&start);
   m.PushBacktrack(&fail);
-  m.CheckNotAtStart(NULL);
+  m.CheckNotAtStart(0, NULL);
   m.LoadCurrentCharacter(0, NULL);
   m.CheckNotCharacter('f', NULL);
   m.LoadCurrentCharacter(1, NULL);
@@ -1674,26 +1705,26 @@ TEST(CanonicalizeCharacterSets) {
   list->Add(CharacterRange(30, 40), &zone);
   list->Add(CharacterRange(50, 60), &zone);
   set.Canonicalize();
-  DCHECK_EQ(3, list->length());
-  DCHECK_EQ(10, list->at(0).from());
-  DCHECK_EQ(20, list->at(0).to());
-  DCHECK_EQ(30, list->at(1).from());
-  DCHECK_EQ(40, list->at(1).to());
-  DCHECK_EQ(50, list->at(2).from());
-  DCHECK_EQ(60, list->at(2).to());
+  CHECK_EQ(3, list->length());
+  CHECK_EQ(10, list->at(0).from());
+  CHECK_EQ(20, list->at(0).to());
+  CHECK_EQ(30, list->at(1).from());
+  CHECK_EQ(40, list->at(1).to());
+  CHECK_EQ(50, list->at(2).from());
+  CHECK_EQ(60, list->at(2).to());
 
   list->Rewind(0);
   list->Add(CharacterRange(10, 20), &zone);
   list->Add(CharacterRange(50, 60), &zone);
   list->Add(CharacterRange(30, 40), &zone);
   set.Canonicalize();
-  DCHECK_EQ(3, list->length());
-  DCHECK_EQ(10, list->at(0).from());
-  DCHECK_EQ(20, list->at(0).to());
-  DCHECK_EQ(30, list->at(1).from());
-  DCHECK_EQ(40, list->at(1).to());
-  DCHECK_EQ(50, list->at(2).from());
-  DCHECK_EQ(60, list->at(2).to());
+  CHECK_EQ(3, list->length());
+  CHECK_EQ(10, list->at(0).from());
+  CHECK_EQ(20, list->at(0).to());
+  CHECK_EQ(30, list->at(1).from());
+  CHECK_EQ(40, list->at(1).to());
+  CHECK_EQ(50, list->at(2).from());
+  CHECK_EQ(60, list->at(2).to());
 
   list->Rewind(0);
   list->Add(CharacterRange(30, 40), &zone);
@@ -1702,26 +1733,26 @@ TEST(CanonicalizeCharacterSets) {
   list->Add(CharacterRange(100, 100), &zone);
   list->Add(CharacterRange(1, 1), &zone);
   set.Canonicalize();
-  DCHECK_EQ(5, list->length());
-  DCHECK_EQ(1, list->at(0).from());
-  DCHECK_EQ(1, list->at(0).to());
-  DCHECK_EQ(10, list->at(1).from());
-  DCHECK_EQ(20, list->at(1).to());
-  DCHECK_EQ(25, list->at(2).from());
-  DCHECK_EQ(25, list->at(2).to());
-  DCHECK_EQ(30, list->at(3).from());
-  DCHECK_EQ(40, list->at(3).to());
-  DCHECK_EQ(100, list->at(4).from());
-  DCHECK_EQ(100, list->at(4).to());
+  CHECK_EQ(5, list->length());
+  CHECK_EQ(1, list->at(0).from());
+  CHECK_EQ(1, list->at(0).to());
+  CHECK_EQ(10, list->at(1).from());
+  CHECK_EQ(20, list->at(1).to());
+  CHECK_EQ(25, list->at(2).from());
+  CHECK_EQ(25, list->at(2).to());
+  CHECK_EQ(30, list->at(3).from());
+  CHECK_EQ(40, list->at(3).to());
+  CHECK_EQ(100, list->at(4).from());
+  CHECK_EQ(100, list->at(4).to());
 
   list->Rewind(0);
   list->Add(CharacterRange(10, 19), &zone);
   list->Add(CharacterRange(21, 30), &zone);
   list->Add(CharacterRange(20, 20), &zone);
   set.Canonicalize();
-  DCHECK_EQ(1, list->length());
-  DCHECK_EQ(10, list->at(0).from());
-  DCHECK_EQ(30, list->at(0).to());
+  CHECK_EQ(1, list->length());
+  CHECK_EQ(10, list->at(0).from());
+  CHECK_EQ(30, list->at(0).to());
 }
 
 
@@ -1803,8 +1834,8 @@ TEST(CharacterRangeMerge) {
     offset += 9;
   }
 
-  DCHECK(CharacterRange::IsCanonical(&l1));
-  DCHECK(CharacterRange::IsCanonical(&l2));
+  CHECK(CharacterRange::IsCanonical(&l1));
+  CHECK(CharacterRange::IsCanonical(&l2));
 
   ZoneList<CharacterRange> first_only(4, &zone);
   ZoneList<CharacterRange> second_only(4, &zone);

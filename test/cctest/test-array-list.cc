@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// TODO(jochen): Remove this after the setting is turned on globally.
+#define V8_IMMINENT_DEPRECATION_WARNINGS
+
 #include <stdlib.h>
 
 #include "src/v8.h"
@@ -38,4 +41,5 @@ TEST(ArrayList) {
   CHECK_EQ(100, Smi::cast(array->Get(0))->value());
   CHECK_EQ(200, Smi::cast(array->Get(1))->value());
 }
-}
+
+}  // namespace

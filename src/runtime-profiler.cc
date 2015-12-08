@@ -2,20 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #include "src/runtime-profiler.h"
 
 #include "src/assembler.h"
+#include "src/ast/scopeinfo.h"
 #include "src/base/platform/platform.h"
 #include "src/bootstrapper.h"
 #include "src/code-stubs.h"
 #include "src/compilation-cache.h"
 #include "src/execution.h"
-#include "src/full-codegen.h"
+#include "src/frames-inl.h"
+#include "src/full-codegen/full-codegen.h"
 #include "src/global-handles.h"
-#include "src/heap/mark-compact.h"
-#include "src/scopeinfo.h"
 
 namespace v8 {
 namespace internal {
@@ -110,7 +108,7 @@ void RuntimeProfiler::Optimize(JSFunction* function, const char* reason) {
 void RuntimeProfiler::AttemptOnStackReplacement(JSFunction* function,
                                                 int loop_nesting_levels) {
   SharedFunctionInfo* shared = function->shared();
-  if (!FLAG_use_osr || function->IsBuiltin()) {
+  if (!FLAG_use_osr || function->shared()->IsBuiltin()) {
     return;
   }
 
@@ -181,10 +179,12 @@ void RuntimeProfiler::OptimizeNow() {
       // Attempt OSR if we are still running unoptimized code even though the
       // the function has long been marked or even already been optimized.
       int ticks = shared_code->profiler_ticks();
-      int allowance = kOSRCodeSizeAllowanceBase +
-                      ticks * kOSRCodeSizeAllowancePerTick;
-      if (shared_code->CodeSize() > allowance) {
-        if (ticks < 255) shared_code->set_profiler_ticks(ticks + 1);
+      int64_t allowance =
+          kOSRCodeSizeAllowanceBase +
+          static_cast<int64_t>(ticks) * kOSRCodeSizeAllowancePerTick;
+      if (shared_code->CodeSize() > allowance &&
+          ticks < Code::ProfilerTicksField::kMax) {
+        shared_code->set_profiler_ticks(ticks + 1);
       } else {
         AttemptOnStackReplacement(function);
       }

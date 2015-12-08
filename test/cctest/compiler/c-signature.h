@@ -5,7 +5,7 @@
 #ifndef V8_COMPILER_C_SIGNATURE_H_
 #define V8_COMPILER_C_SIGNATURE_H_
 
-#include "src/compiler/machine-type.h"
+#include "src/machine-type.h"
 
 namespace v8 {
 namespace internal {
@@ -13,7 +13,7 @@ namespace compiler {
 
 #define FOREACH_CTYPE_MACHINE_TYPE_MAPPING(V) \
   V(void, kMachNone)                          \
-  V(bool, kMachBool)                          \
+  V(bool, kMachUint8)                         \
   V(int8_t, kMachInt8)                        \
   V(uint8_t, kMachUint8)                      \
   V(int16_t, kMachInt16)                      \
@@ -69,6 +69,10 @@ class CSignature : public MachineSignature {
     }
   }
 
+  static CSignature* FromMachine(Zone* zone, MachineSignature* msig) {
+    return reinterpret_cast<CSignature*>(msig);
+  }
+
   static CSignature* New(Zone* zone, MachineType ret,
                          MachineType p1 = kMachNone, MachineType p2 = kMachNone,
                          MachineType p3 = kMachNone, MachineType p4 = kMachNone,
@@ -111,7 +115,8 @@ class CSignatureOf : public CSignature {
     if (return_count_ == 1) storage_[0] = MachineTypeForC<Ret>();
   }
   void Set(int index, MachineType type) {
-    DCHECK(index >= 0 && index < kParamCount);
+    CHECK_LE(0, index);
+    CHECK_LT(index, kParamCount);
     reps_[return_count_ + index] = type;
   }
 };
@@ -155,8 +160,8 @@ typedef CSignature2<uint32_t, uint32_t, uint32_t> CSignature_u_uu;
 typedef CSignature2<float, float, float> CSignature_f_ff;
 typedef CSignature2<double, double, double> CSignature_d_dd;
 typedef CSignature2<Object*, Object*, Object*> CSignature_o_oo;
-}
-}
-}  // namespace v8::internal::compiler
+}  // namespace compiler
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_COMPILER_C_SIGNATURE_H_

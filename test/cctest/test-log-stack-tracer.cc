@@ -27,6 +27,9 @@
 //
 // Tests of profiler-related functions from log.h
 
+// TODO(jochen): Remove this after the setting is turned on globally.
+#define V8_IMMINENT_DEPRECATION_WARNINGS
+
 #include <stdlib.h>
 
 #include "src/v8.h"
@@ -36,7 +39,7 @@
 #include "src/disassembler.h"
 #include "src/isolate.h"
 #include "src/log.h"
-#include "src/sampler.h"
+#include "src/profiler/sampler.h"
 #include "src/vm-state-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/trace-extension.h"
@@ -65,7 +68,8 @@ static bool IsAddressWithinFuncCode(JSFunction* function, Address addr) {
 static bool IsAddressWithinFuncCode(v8::Local<v8::Context> context,
                                     const char* func_name,
                                     Address addr) {
-  v8::Local<v8::Value> func = context->Global()->Get(v8_str(func_name));
+  v8::Local<v8::Value> func =
+      context->Global()->Get(context, v8_str(func_name)).ToLocalChecked();
   CHECK(func->IsFunction());
   JSFunction* js_func = JSFunction::cast(*v8::Utils::OpenHandle(*func));
   return IsAddressWithinFuncCode(js_func, addr);
@@ -85,15 +89,18 @@ static void construct_call(const v8::FunctionCallbackInfo<v8::Value>& args) {
   i::StackFrame* calling_frame = frame_iterator.frame();
   CHECK(calling_frame->is_java_script());
 
+  v8::Local<v8::Context> context = args.GetIsolate()->GetCurrentContext();
 #if defined(V8_HOST_ARCH_32_BIT)
   int32_t low_bits = reinterpret_cast<int32_t>(calling_frame->fp());
-  args.This()->Set(v8_str("low_bits"), v8_num(low_bits >> 1));
+  args.This()
+      ->Set(context, v8_str("low_bits"), v8_num(low_bits >> 1))
+      .FromJust();
 #elif defined(V8_HOST_ARCH_64_BIT)
   uint64_t fp = reinterpret_cast<uint64_t>(calling_frame->fp());
   int32_t low_bits = static_cast<int32_t>(fp & 0xffffffff);
   int32_t high_bits = static_cast<int32_t>(fp >> 32);
-  args.This()->Set(v8_str("low_bits"), v8_num(low_bits));
-  args.This()->Set(v8_str("high_bits"), v8_num(high_bits));
+  args.This()->Set(context, v8_str("low_bits"), v8_num(low_bits)).FromJust();
+  args.This()->Set(context, v8_str("high_bits"), v8_num(high_bits)).FromJust();
 #else
 #error Host architecture is neither 32-bit nor 64-bit.
 #endif
@@ -107,8 +114,9 @@ void CreateFramePointerGrabberConstructor(v8::Local<v8::Context> context,
     Local<v8::FunctionTemplate> constructor_template =
         v8::FunctionTemplate::New(context->GetIsolate(), construct_call);
     constructor_template->SetClassName(v8_str("FPGrabber"));
-    Local<Function> fun = constructor_template->GetFunction();
-    context->Global()->Set(v8_str(constructor_name), fun);
+    Local<Function> fun =
+        constructor_template->GetFunction(context).ToLocalChecked();
+    context->Global()->Set(context, v8_str(constructor_name), fun).FromJust();
 }
 
 
@@ -141,6 +149,7 @@ static void CreateTraceCallerFunction(v8::Local<v8::Context> context,
 // walking.
 TEST(CFromJSStackTrace) {
   // BUG(1303) Inlining of JSFuncDoTrace() in JSTrace below breaks this test.
+  i::FLAG_turbo_inlining = false;
   i::FLAG_use_inlining = false;
 
   TickSample sample;
@@ -189,6 +198,7 @@ TEST(CFromJSStackTrace) {
 TEST(PureJSStackTrace) {
   // This test does not pass with inlining enabled since inlined functions
   // don't appear in the stack trace.
+  i::FLAG_turbo_inlining = false;
   i::FLAG_use_inlining = false;
 
   TickSample sample;

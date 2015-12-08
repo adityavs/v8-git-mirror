@@ -4,6 +4,7 @@
 
 #include "test/unittests/compiler/instruction-selector-unittest.h"
 
+#include "src/code-factory.h"
 #include "src/compiler/graph.h"
 #include "src/compiler/schedule.h"
 #include "src/flags.h"
@@ -12,12 +13,6 @@
 namespace v8 {
 namespace internal {
 namespace compiler {
-
-namespace {
-
-typedef RawMachineAssembler::Label MLabel;
-
-}  // namespace
 
 
 InstructionSelectorTest::InstructionSelectorTest() : rng_(FLAG_random_seed) {}
@@ -51,7 +46,8 @@ InstructionSelectorTest::Stream InstructionSelectorTest::StreamBuilder::Build(
   if (FLAG_trace_turbo) {
     OFStream out(stdout);
     PrintableInstructionSequence printable = {
-        RegisterConfiguration::ArchDefault(), &sequence};
+        RegisterConfiguration::ArchDefault(RegisterConfiguration::TURBOFAN),
+        &sequence};
     out << "=== Code sequence after instruction selection ===" << std::endl
         << printable;
   }
@@ -127,8 +123,7 @@ bool InstructionSelectorTest::Stream::IsFixed(const InstructionOperand* operand,
   if (!operand->IsUnallocated()) return false;
   const UnallocatedOperand* unallocated = UnallocatedOperand::cast(operand);
   if (!unallocated->HasFixedRegisterPolicy()) return false;
-  const int index = Register::ToAllocationIndex(reg);
-  return unallocated->fixed_register_index() == index;
+  return unallocated->fixed_register_index() == reg.code();
 }
 
 
@@ -153,7 +148,7 @@ InstructionSelectorTest::StreamBuilder::GetFrameStateFunctionInfo(
     int parameter_count, int local_count) {
   return common()->CreateFrameStateFunctionInfo(
       FrameStateType::kJavaScriptFunction, parameter_count, local_count,
-      Handle<SharedFunctionInfo>());
+      Handle<SharedFunctionInfo>(), CALL_MAINTAINS_NATIVE_CONTEXT);
 }
 
 
@@ -207,7 +202,8 @@ TARGET_TEST_F(InstructionSelectorTest, ReturnZero) {
 
 TARGET_TEST_F(InstructionSelectorTest, TruncateFloat64ToInt32WithParameter) {
   StreamBuilder m(this, kMachInt32, kMachFloat64);
-  m.Return(m.TruncateFloat64ToInt32(m.Parameter(0)));
+  m.Return(
+      m.TruncateFloat64ToInt32(TruncationMode::kJavaScript, m.Parameter(0)));
   Stream s = m.Build(kAllInstructions);
   ASSERT_EQ(4U, s.size());
   EXPECT_EQ(kArchNop, s[0]->arch_opcode());
@@ -241,13 +237,14 @@ TARGET_TEST_F(InstructionSelectorTest, ReferenceParameter) {
 
 
 // -----------------------------------------------------------------------------
-// Finish.
+// FinishRegion.
 
 
-TARGET_TEST_F(InstructionSelectorTest, Finish) {
+TARGET_TEST_F(InstructionSelectorTest, FinishRegion) {
   StreamBuilder m(this, kMachAnyTagged, kMachAnyTagged);
   Node* param = m.Parameter(0);
-  Node* finish = m.NewNode(m.common()->Finish(1), param, m.graph()->start());
+  Node* finish =
+      m.AddNode(m.common()->FinishRegion(), param, m.graph()->start());
   m.Return(finish);
   Stream s = m.Build(kAllInstructions);
   ASSERT_EQ(4U, s.size());
@@ -280,7 +277,7 @@ TARGET_TEST_P(InstructionSelectorPhiTest, Doubleness) {
   StreamBuilder m(this, type, type, type);
   Node* param0 = m.Parameter(0);
   Node* param1 = m.Parameter(1);
-  MLabel a, b, c;
+  RawMachineLabel a, b, c;
   m.Branch(m.Int32Constant(0), &a, &b);
   m.Bind(&a);
   m.Goto(&c);
@@ -300,7 +297,7 @@ TARGET_TEST_P(InstructionSelectorPhiTest, Referenceness) {
   StreamBuilder m(this, type, type, type);
   Node* param0 = m.Parameter(0);
   Node* param1 = m.Parameter(1);
-  MLabel a, b, c;
+  RawMachineLabel a, b, c;
   m.Branch(m.Int32Constant(1), &a, &b);
   m.Bind(&a);
   m.Goto(&c);
@@ -333,8 +330,9 @@ TARGET_TEST_F(InstructionSelectorTest, ValueEffect) {
   Stream s1 = m1.Build(kAllInstructions);
   StreamBuilder m2(this, kMachInt32, kMachPtr);
   Node* p2 = m2.Parameter(0);
-  m2.Return(m2.NewNode(m2.machine()->Load(kMachInt32), p2, m2.Int32Constant(0),
-                       m2.NewNode(m2.common()->ValueEffect(1), p2)));
+  m2.Return(
+      m2.AddNode(m2.machine()->Load(kMachInt32), p2, m2.Int32Constant(0),
+                 m2.AddNode(m2.common()->BeginRegion(), m2.graph()->start())));
   Stream s2 = m2.Build(kAllInstructions);
   EXPECT_LE(3U, s1.size());
   ASSERT_EQ(s1.size(), s2.size());
@@ -365,18 +363,25 @@ TARGET_TEST_F(InstructionSelectorTest, CallJSFunctionWithDeopt) {
   ZoneVector<MachineType> int32_type(1, kMachInt32, zone());
   ZoneVector<MachineType> empty_types(zone());
 
-  Node* parameters =
-      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(1));
-  Node* locals = m.NewNode(m.common()->TypedStateValues(&empty_types));
-  Node* stack = m.NewNode(m.common()->TypedStateValues(&empty_types));
-  Node* context_dummy = m.Int32Constant(0);
+  CallDescriptor* descriptor = Linkage::GetJSCallDescriptor(
+      zone(), false, 1, CallDescriptor::kNeedsFrameState);
 
-  Node* state_node = m.NewNode(
+  // Build frame state for the state before the call.
+  Node* parameters =
+      m.AddNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(1));
+  Node* locals = m.AddNode(m.common()->TypedStateValues(&empty_types));
+  Node* stack = m.AddNode(m.common()->TypedStateValues(&empty_types));
+  Node* context_sentinel = m.Int32Constant(0);
+  Node* state_node = m.AddNode(
       m.common()->FrameState(bailout_id, OutputFrameStateCombine::Push(),
                              m.GetFrameStateFunctionInfo(1, 0)),
-      parameters, locals, stack, context_dummy, function_node,
+      parameters, locals, stack, context_sentinel, function_node,
       m.UndefinedConstant());
-  Node* call = m.CallJS0(function_node, receiver, context, state_node);
+
+  // Build the call.
+  Node* args[] = {receiver, m.UndefinedConstant(), m.Int32Constant(1), context};
+  Node* call =
+      m.CallNWithFrameState(descriptor, function_node, args, state_node);
   m.Return(call);
 
   Stream s = m.Build(kAllExceptNopInstructions);
@@ -396,7 +401,7 @@ TARGET_TEST_F(InstructionSelectorTest, CallJSFunctionWithDeopt) {
 }
 
 
-TARGET_TEST_F(InstructionSelectorTest, CallFunctionStubWithDeopt) {
+TARGET_TEST_F(InstructionSelectorTest, CallStubWithDeopt) {
   StreamBuilder m(this, kMachAnyTagged, kMachAnyTagged, kMachAnyTagged,
                   kMachAnyTagged);
 
@@ -411,25 +416,29 @@ TARGET_TEST_F(InstructionSelectorTest, CallFunctionStubWithDeopt) {
   ZoneVector<MachineType> float64_type(1, kMachFloat64, zone());
   ZoneVector<MachineType> tagged_type(1, kMachAnyTagged, zone());
 
+  Callable callable = CodeFactory::ToObject(isolate());
+  CallDescriptor* descriptor = Linkage::GetStubCallDescriptor(
+      isolate(), zone(), callable.descriptor(), 1,
+      CallDescriptor::kNeedsFrameState, Operator::kNoProperties);
+
   // Build frame state for the state before the call.
   Node* parameters =
-      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(43));
-  Node* locals = m.NewNode(m.common()->TypedStateValues(&float64_type),
+      m.AddNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(43));
+  Node* locals = m.AddNode(m.common()->TypedStateValues(&float64_type),
                            m.Float64Constant(0.5));
-  Node* stack = m.NewNode(m.common()->TypedStateValues(&tagged_type),
+  Node* stack = m.AddNode(m.common()->TypedStateValues(&tagged_type),
                           m.UndefinedConstant());
-
   Node* context_sentinel = m.Int32Constant(0);
-  Node* frame_state_before = m.NewNode(
+  Node* state_node = m.AddNode(
       m.common()->FrameState(bailout_id_before, OutputFrameStateCombine::Push(),
                              m.GetFrameStateFunctionInfo(1, 1)),
       parameters, locals, stack, context_sentinel, function_node,
       m.UndefinedConstant());
 
   // Build the call.
-  Node* call = m.CallFunctionStub0(function_node, receiver, context,
-                                   frame_state_before, CALL_AS_METHOD);
-
+  Node* args[] = {function_node, receiver, context};
+  Node* stub_code = m.HeapConstant(callable.code());
+  Node* call = m.CallNWithFrameState(descriptor, stub_code, args, state_node);
   m.Return(call);
 
   Stream s = m.Build(kAllExceptNopInstructions);
@@ -490,8 +499,7 @@ TARGET_TEST_F(InstructionSelectorTest, CallFunctionStubWithDeopt) {
 }
 
 
-TARGET_TEST_F(InstructionSelectorTest,
-              CallFunctionStubDeoptRecursiveFrameState) {
+TARGET_TEST_F(InstructionSelectorTest, CallStubWithDeoptRecursiveFrameState) {
   StreamBuilder m(this, kMachAnyTagged, kMachAnyTagged, kMachAnyTagged,
                   kMachAnyTagged);
 
@@ -502,41 +510,46 @@ TARGET_TEST_F(InstructionSelectorTest,
   Node* function_node = m.Parameter(0);
   Node* receiver = m.Parameter(1);
   Node* context = m.Int32Constant(66);
+  Node* context2 = m.Int32Constant(46);
 
   ZoneVector<MachineType> int32_type(1, kMachInt32, zone());
   ZoneVector<MachineType> int32x2_type(2, kMachInt32, zone());
   ZoneVector<MachineType> float64_type(1, kMachFloat64, zone());
 
+  Callable callable = CodeFactory::ToObject(isolate());
+  CallDescriptor* descriptor = Linkage::GetStubCallDescriptor(
+      isolate(), zone(), callable.descriptor(), 1,
+      CallDescriptor::kNeedsFrameState, Operator::kNoProperties);
+
   // Build frame state for the state before the call.
   Node* parameters =
-      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(63));
+      m.AddNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(63));
   Node* locals =
-      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(64));
+      m.AddNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(64));
   Node* stack =
-      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(65));
-  Node* frame_state_parent = m.NewNode(
+      m.AddNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(65));
+  Node* frame_state_parent = m.AddNode(
       m.common()->FrameState(bailout_id_parent,
                              OutputFrameStateCombine::Ignore(),
                              m.GetFrameStateFunctionInfo(1, 1)),
       parameters, locals, stack, context, function_node, m.UndefinedConstant());
 
-  Node* context2 = m.Int32Constant(46);
   Node* parameters2 =
-      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(43));
-  Node* locals2 = m.NewNode(m.common()->TypedStateValues(&float64_type),
+      m.AddNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(43));
+  Node* locals2 = m.AddNode(m.common()->TypedStateValues(&float64_type),
                             m.Float64Constant(0.25));
-  Node* stack2 = m.NewNode(m.common()->TypedStateValues(&int32x2_type),
+  Node* stack2 = m.AddNode(m.common()->TypedStateValues(&int32x2_type),
                            m.Int32Constant(44), m.Int32Constant(45));
-  Node* frame_state_before = m.NewNode(
+  Node* state_node = m.AddNode(
       m.common()->FrameState(bailout_id_before, OutputFrameStateCombine::Push(),
                              m.GetFrameStateFunctionInfo(1, 1)),
       parameters2, locals2, stack2, context2, function_node,
       frame_state_parent);
 
   // Build the call.
-  Node* call = m.CallFunctionStub0(function_node, receiver, context2,
-                                   frame_state_before, CALL_AS_METHOD);
-
+  Node* args[] = {function_node, receiver, context2};
+  Node* stub_code = m.HeapConstant(callable.code());
+  Node* call = m.CallNWithFrameState(descriptor, stub_code, args, state_node);
   m.Return(call);
 
   Stream s = m.Build(kAllExceptNopInstructions);

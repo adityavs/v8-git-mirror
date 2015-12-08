@@ -32,10 +32,11 @@
 #include "src/v8.h"
 
 #include "include/v8-profiler.h"
-#include "src/allocation-tracker.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/hashmap.h"
-#include "src/heap-profiler.h"
+#include "src/profiler/allocation-tracker.h"
+#include "src/profiler/heap-profiler.h"
+#include "src/profiler/heap-snapshot-generator-inl.h"
 #include "test/cctest/cctest.h"
 
 using i::AllocationTraceNode;
@@ -481,6 +482,37 @@ TEST(HeapSnapshotSymbol) {
 }
 
 
+void CheckSimdSnapshot(const char* program, const char* var_name) {
+  i::FLAG_harmony_simd = true;
+  LocalContext env;
+  v8::HandleScope scope(env->GetIsolate());
+  v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
+
+  CompileRun(program);
+  const v8::HeapSnapshot* snapshot = heap_profiler->TakeHeapSnapshot();
+  CHECK(ValidateSnapshot(snapshot));
+  const v8::HeapGraphNode* global = GetGlobalObject(snapshot);
+  const v8::HeapGraphNode* var =
+      GetProperty(global, v8::HeapGraphEdge::kProperty, var_name);
+  CHECK(var);
+  CHECK_EQ(var->GetType(), v8::HeapGraphNode::kSimdValue);
+}
+
+
+TEST(HeapSnapshotSimd) {
+  CheckSimdSnapshot("a = SIMD.Float32x4();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Int32x4();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Uint32x4();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Bool32x4();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Int16x8();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Uint16x8();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Bool16x8();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Int8x16();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Uint8x16();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Bool8x16();\n", "a");
+}
+
+
 TEST(HeapSnapshotWeakCollection) {
   LocalContext env;
   v8::HandleScope scope(env->GetIsolate());
@@ -830,7 +862,7 @@ class TestJSONStream : public v8::OutputStream {
     return kContinue;
   }
   virtual WriteResult WriteUint32Chunk(uint32_t* buffer, int chars_written) {
-    DCHECK(false);
+    CHECK(false);
     return kAbort;
   }
   void WriteTo(i::Vector<char> dest) { buffer_.WriteTo(dest); }
@@ -999,13 +1031,13 @@ class TestStatsStream : public v8::OutputStream {
   virtual ~TestStatsStream() {}
   virtual void EndOfStream() { ++eos_signaled_; }
   virtual WriteResult WriteAsciiChunk(char* buffer, int chars_written) {
-    DCHECK(false);
+    CHECK(false);
     return kAbort;
   }
   virtual WriteResult WriteHeapStatsChunk(v8::HeapStatsUpdate* buffer,
                                           int updates_written) {
     ++intervals_count_;
-    DCHECK(updates_written);
+    CHECK(updates_written);
     updates_written_ += updates_written;
     entries_count_ = 0;
     if (first_interval_index_ == -1 && updates_written != 0)
@@ -1318,7 +1350,8 @@ class TestActivityControl : public v8::ActivityControl {
   int total_;
   int abort_count_;
 };
-}
+
+}  // namespace
 
 
 TEST(TakeHeapSnapshotAborting) {
@@ -1411,7 +1444,8 @@ class TestRetainedObjectInfo : public v8::RetainedObjectInfo {
 
 
 i::List<TestRetainedObjectInfo*> TestRetainedObjectInfo::instances;
-}
+
+}  // namespace
 
 
 static const v8::HeapGraphNode* GetNode(const v8::HeapGraphNode* parent,
@@ -1504,7 +1538,8 @@ class GraphWithImplicitRefs {
     instance_ = NULL;
   }
 
-  static void gcPrologue(v8::GCType type, v8::GCCallbackFlags flags) {
+  static void gcPrologue(v8::Isolate* isolate, v8::GCType type,
+                         v8::GCCallbackFlags flags) {
     instance_->AddImplicitReferences();
   }
 
@@ -1536,7 +1571,7 @@ TEST(HeapSnapshotImplicitReferences) {
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
 
   GraphWithImplicitRefs graph(&env);
-  v8::V8::AddGCPrologueCallback(&GraphWithImplicitRefs::gcPrologue);
+  env->GetIsolate()->AddGCPrologueCallback(&GraphWithImplicitRefs::gcPrologue);
 
   const v8::HeapSnapshot* snapshot = heap_profiler->TakeHeapSnapshot();
   CHECK(ValidateSnapshot(snapshot));
@@ -1559,7 +1594,8 @@ TEST(HeapSnapshotImplicitReferences) {
     }
   }
   CHECK_EQ(2, implicit_targets_count);
-  v8::V8::RemoveGCPrologueCallback(&GraphWithImplicitRefs::gcPrologue);
+  env->GetIsolate()->RemoveGCPrologueCallback(
+      &GraphWithImplicitRefs::gcPrologue);
 }
 
 
@@ -1663,9 +1699,6 @@ TEST(GlobalObjectFields) {
   const v8::HeapSnapshot* snapshot = heap_profiler->TakeHeapSnapshot();
   CHECK(ValidateSnapshot(snapshot));
   const v8::HeapGraphNode* global = GetGlobalObject(snapshot);
-  const v8::HeapGraphNode* builtins =
-      GetProperty(global, v8::HeapGraphEdge::kInternal, "builtins");
-  CHECK(builtins);
   const v8::HeapGraphNode* native_context =
       GetProperty(global, v8::HeapGraphEdge::kInternal, "native_context");
   CHECK(native_context);
@@ -1768,7 +1801,7 @@ TEST(GetHeapValueForDeletedObject) {
 
 
 static int StringCmp(const char* ref, i::String* act) {
-  i::SmartArrayPointer<char> s_act = act->ToCString();
+  v8::base::SmartArrayPointer<char> s_act = act->ToCString();
   int result = strcmp(ref, s_act.get());
   if (result != 0)
     fprintf(stderr, "Expected: \"%s\", Actual: \"%s\"\n", ref, s_act.get());
@@ -1786,42 +1819,44 @@ TEST(GetConstructorName) {
       "var Constructor2 = function() {};\n"
       "var obj2 = new Constructor2();\n"
       "var obj3 = {};\n"
-      "obj3.constructor = function Constructor3() {};\n"
+      "obj3.__proto__ = { constructor: function Constructor3() {} };\n"
       "var obj4 = {};\n"
       "// Slow properties\n"
       "for (var i=0; i<2000; ++i) obj4[\"p\" + i] = i;\n"
-      "obj4.constructor = function Constructor4() {};\n"
+      "obj4.__proto__ = { constructor: function Constructor4() {} };\n"
       "var obj5 = {};\n"
       "var obj6 = {};\n"
       "obj6.constructor = 6;");
   v8::Local<v8::Object> js_global =
       env->Global()->GetPrototype().As<v8::Object>();
   v8::Local<v8::Object> obj1 = js_global->Get(v8_str("obj1")).As<v8::Object>();
-  i::Handle<i::JSObject> js_obj1 = v8::Utils::OpenHandle(*obj1);
+  i::Handle<i::JSObject> js_obj1 =
+      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj1));
   CHECK_EQ(0, StringCmp(
       "Constructor1", i::V8HeapExplorer::GetConstructorName(*js_obj1)));
   v8::Local<v8::Object> obj2 = js_global->Get(v8_str("obj2")).As<v8::Object>();
-  i::Handle<i::JSObject> js_obj2 = v8::Utils::OpenHandle(*obj2);
+  i::Handle<i::JSObject> js_obj2 =
+      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj2));
   CHECK_EQ(0, StringCmp(
       "Constructor2", i::V8HeapExplorer::GetConstructorName(*js_obj2)));
   v8::Local<v8::Object> obj3 = js_global->Get(v8_str("obj3")).As<v8::Object>();
-  i::Handle<i::JSObject> js_obj3 = v8::Utils::OpenHandle(*obj3);
-  // TODO(verwaest): Restore to Constructor3 once supported by the
-  // heap-snapshot-generator.
-  CHECK_EQ(
-      0, StringCmp("Object", i::V8HeapExplorer::GetConstructorName(*js_obj3)));
+  i::Handle<i::JSObject> js_obj3 =
+      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj3));
+  CHECK_EQ(0, StringCmp("Constructor3",
+                        i::V8HeapExplorer::GetConstructorName(*js_obj3)));
   v8::Local<v8::Object> obj4 = js_global->Get(v8_str("obj4")).As<v8::Object>();
-  i::Handle<i::JSObject> js_obj4 = v8::Utils::OpenHandle(*obj4);
-  // TODO(verwaest): Restore to Constructor4 once supported by the
-  // heap-snapshot-generator.
-  CHECK_EQ(
-      0, StringCmp("Object", i::V8HeapExplorer::GetConstructorName(*js_obj4)));
+  i::Handle<i::JSObject> js_obj4 =
+      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj4));
+  CHECK_EQ(0, StringCmp("Constructor4",
+                        i::V8HeapExplorer::GetConstructorName(*js_obj4)));
   v8::Local<v8::Object> obj5 = js_global->Get(v8_str("obj5")).As<v8::Object>();
-  i::Handle<i::JSObject> js_obj5 = v8::Utils::OpenHandle(*obj5);
+  i::Handle<i::JSObject> js_obj5 =
+      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj5));
   CHECK_EQ(0, StringCmp(
       "Object", i::V8HeapExplorer::GetConstructorName(*js_obj5)));
   v8::Local<v8::Object> obj6 = js_global->Get(v8_str("obj6")).As<v8::Object>();
-  i::Handle<i::JSObject> js_obj6 = v8::Utils::OpenHandle(*obj6);
+  i::Handle<i::JSObject> js_obj6 =
+      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj6));
   CHECK_EQ(0, StringCmp(
       "Object", i::V8HeapExplorer::GetConstructorName(*js_obj6)));
 }
@@ -1880,7 +1915,7 @@ TEST(FastCaseRedefinedAccessors) {
       "});\n");
   v8::Local<v8::Object> js_global =
       env->Global()->GetPrototype().As<v8::Object>();
-  i::Handle<i::JSObject> js_obj1 =
+  i::Handle<i::JSReceiver> js_obj1 =
       v8::Utils::OpenHandle(*js_global->Get(v8_str("obj1")).As<v8::Object>());
   USE(js_obj1);
 
@@ -1948,21 +1983,24 @@ TEST(HiddenPropertiesFastCase) {
       GetProperty(global, v8::HeapGraphEdge::kProperty, "c");
   CHECK(c);
   const v8::HeapGraphNode* hidden_props =
-      GetProperty(c, v8::HeapGraphEdge::kInternal, "hidden_properties");
+      GetProperty(c, v8::HeapGraphEdge::kProperty, "<symbol>");
   CHECK(!hidden_props);
 
   v8::Handle<v8::Value> cHandle =
       env->Global()->Get(v8::String::NewFromUtf8(env->GetIsolate(), "c"));
   CHECK(!cHandle.IsEmpty() && cHandle->IsObject());
-  cHandle->ToObject(isolate)->SetHiddenValue(v8_str("key"), v8_str("val"));
+  cHandle->ToObject(isolate)
+      ->SetPrivate(env.local(),
+                   v8::Private::ForApi(env->GetIsolate(), v8_str("key")),
+                   v8_str("val"))
+      .FromJust();
 
   snapshot = heap_profiler->TakeHeapSnapshot();
   CHECK(ValidateSnapshot(snapshot));
   global = GetGlobalObject(snapshot);
   c = GetProperty(global, v8::HeapGraphEdge::kProperty, "c");
   CHECK(c);
-  hidden_props = GetProperty(c, v8::HeapGraphEdge::kInternal,
-      "hidden_properties");
+  hidden_props = GetProperty(c, v8::HeapGraphEdge::kProperty, "<symbol>");
   CHECK(hidden_props);
 }
 
@@ -2459,22 +2497,23 @@ TEST(TrackHeapAllocations) {
 
 
 static const char* inline_heap_allocation_source =
-"function f_0(x) {\n"
-"  return f_1(x+1);\n"
-"}\n"
-"%NeverOptimizeFunction(f_0);\n"
-"function f_1(x) {\n"
-"  return new f_2(x+1);\n"
-"}\n"
-"function f_2(x) {\n"
-"  this.foo = x;\n"
-"}\n"
-"var instances = [];\n"
-"function start() {\n"
-"  instances.push(f_0(0));\n"
-"}\n"
-"\n"
-"for (var i = 0; i < 100; i++) start();\n";
+    "function f_0(x) {\n"
+    "  return f_1(x+1);\n"
+    "}\n"
+    "%NeverOptimizeFunction(f_0);\n"
+    "function f_1(x) {\n"
+    "  return new f_2(x+1);\n"
+    "}\n"
+    "%NeverOptimizeFunction(f_1);\n"
+    "function f_2(x) {\n"
+    "  this.foo = x;\n"
+    "}\n"
+    "var instances = [];\n"
+    "function start() {\n"
+    "  instances.push(f_0(0));\n"
+    "}\n"
+    "\n"
+    "for (var i = 0; i < 100; i++) start();\n";
 
 
 TEST(TrackBumpPointerAllocations) {
@@ -2613,7 +2652,7 @@ TEST(ArrayBufferSharedBackingStore) {
 
   CHECK_EQ(1024, static_cast<int>(ab_contents.ByteLength()));
   void* data = ab_contents.Data();
-  DCHECK(data != NULL);
+  CHECK(data != NULL);
   v8::Local<v8::ArrayBuffer> ab2 =
       v8::ArrayBuffer::New(isolate, data, ab_contents.ByteLength());
   CHECK(ab2->IsExternal());

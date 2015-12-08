@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #if V8_TARGET_ARCH_X87
 
 #include "src/interface-descriptors.h"
@@ -32,20 +30,42 @@ const Register VectorStoreICTrampolineDescriptor::SlotRegister() { return edi; }
 const Register VectorStoreICDescriptor::VectorRegister() { return ebx; }
 
 
-const Register StoreTransitionDescriptor::MapRegister() { return ebx; }
-
-
-const Register ElementTransitionAndStoreDescriptor::MapRegister() {
-  return ebx;
+const Register VectorStoreTransitionDescriptor::SlotRegister() {
+  return no_reg;
 }
 
 
-const Register InstanceofDescriptor::left() { return eax; }
-const Register InstanceofDescriptor::right() { return edx; }
+const Register VectorStoreTransitionDescriptor::VectorRegister() { return ebx; }
+
+
+const Register VectorStoreTransitionDescriptor::MapRegister() { return edi; }
+
+
+const Register StoreTransitionDescriptor::MapRegister() { return ebx; }
+
+
+const Register LoadGlobalViaContextDescriptor::SlotRegister() { return ebx; }
+
+
+const Register StoreGlobalViaContextDescriptor::SlotRegister() { return ebx; }
+const Register StoreGlobalViaContextDescriptor::ValueRegister() { return eax; }
+
+
+const Register InstanceOfDescriptor::LeftRegister() { return edx; }
+const Register InstanceOfDescriptor::RightRegister() { return eax; }
+
+
+const Register StringCompareDescriptor::LeftRegister() { return edx; }
+const Register StringCompareDescriptor::RightRegister() { return eax; }
 
 
 const Register ArgumentsAccessReadDescriptor::index() { return edx; }
 const Register ArgumentsAccessReadDescriptor::parameter_count() { return eax; }
+
+
+const Register ArgumentsAccessNewDescriptor::function() { return edi; }
+const Register ArgumentsAccessNewDescriptor::parameter_count() { return ecx; }
+const Register ArgumentsAccessNewDescriptor::parameter_pointer() { return edx; }
 
 
 const Register ApiGetterDescriptor::function_address() { return edx; }
@@ -85,6 +105,18 @@ void ToNumberDescriptor::InitializePlatformSpecific(
 }
 
 
+// static
+const Register ToLengthDescriptor::ReceiverRegister() { return eax; }
+
+
+// static
+const Register ToStringDescriptor::ReceiverRegister() { return eax; }
+
+
+// static
+const Register ToObjectDescriptor::ReceiverRegister() { return eax; }
+
+
 void NumberToStringDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {eax};
@@ -96,6 +128,13 @@ void TypeofDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {ebx};
   data->InitializePlatformSpecific(arraysize(registers), registers, NULL);
+}
+
+
+void FastCloneRegExpDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {edi, eax, ecx, edx};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 
@@ -159,13 +198,32 @@ void CallConstructDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   // eax : number of arguments
   // ebx : feedback vector
-  // edx : (only if ebx is not the megamorphic symbol) slot in feedback
-  //       vector (Smi)
+  // ecx : new target (for IsSuperConstructorCall)
+  // edx : slot in feedback vector (Smi, for RecordCallTarget)
   // edi : constructor function
   // TODO(turbofan): So far we don't gather type feedback and hence skip the
   // slot parameter, but ArrayConstructStub needs the vector to be undefined.
-  Register registers[] = {eax, edi, ebx};
+  Register registers[] = {eax, edi, ecx, ebx};
   data->InitializePlatformSpecific(arraysize(registers), registers, NULL);
+}
+
+
+void CallTrampolineDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // eax : number of arguments
+  // edi : the target to call
+  Register registers[] = {edi, eax};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void ConstructTrampolineDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // eax : number of arguments
+  // edx : the new target
+  // edi : the target to call
+  Register registers[] = {edi, edx, eax};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 
@@ -187,6 +245,13 @@ void AllocateHeapNumberDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   // register state
   data->InitializePlatformSpecific(0, nullptr, nullptr);
+}
+
+
+void AllocateInNewSpaceDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {eax};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 
@@ -300,6 +365,7 @@ void ArgumentAdaptorDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {
       edi,  // JSFunction
+      edx,  // the new target
       eax,  // actual number of arguments
       ebx,  // expected number of arguments
   };
@@ -332,14 +398,39 @@ void ApiAccessorDescriptor::InitializePlatformSpecific(
 }
 
 
-void MathRoundVariantDescriptor::InitializePlatformSpecific(
+void InterpreterPushArgsAndCallDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {
-      edi,  // math rounding function
-      edx,  // vector slot id
+      eax,  // argument count (not including receiver)
+      ebx,  // address of first argument
+      edi   // the target callable to be call
   };
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
+
+
+void InterpreterPushArgsAndConstructDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      eax,  // argument count (not including receiver)
+      edx,  // new target
+      edi,  // constructor
+      ebx,  // address of first argument
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void InterpreterCEntryDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      eax,  // argument count (argc)
+      ecx,  // address of first argument (argv)
+      ebx   // the runtime function to call
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
 }  // namespace internal
 }  // namespace v8
 

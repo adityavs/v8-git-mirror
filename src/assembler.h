@@ -35,24 +35,28 @@
 #ifndef V8_ASSEMBLER_H_
 #define V8_ASSEMBLER_H_
 
-#include "src/v8.h"
-
 #include "src/allocation.h"
 #include "src/builtins.h"
-#include "src/gdb-jit.h"
 #include "src/isolate.h"
+#include "src/parsing/token.h"
 #include "src/runtime/runtime.h"
-#include "src/token.h"
 
 namespace v8 {
 
+// Forward declarations.
 class ApiFunction;
 
 namespace internal {
 
+// Forward declarations.
+class SourcePosition;
 class StatsCounter;
+
 // -----------------------------------------------------------------------------
 // Platform independent assembler base class.
+
+enum class CodeObjectRequired { kNo, kYes };
+
 
 class AssemblerBase: public Malloced {
  public:
@@ -99,7 +103,12 @@ class AssemblerBase: public Malloced {
   // the assembler could clean up internal data structures.
   virtual void AbortedCodeGeneration() { }
 
+  // Debugging
+  void Print();
+
   static const int kMinimalBufferSize = 4*KB;
+
+  static void FlushICache(Isolate* isolate, void* start, size_t size);
 
  protected:
   // The buffer into which code and relocation info are generated. It could
@@ -158,8 +167,10 @@ class DontEmitDebugCodeScope BASE_EMBEDDED {
 // snapshot and the running VM.
 class PredictableCodeSizeScope {
  public:
+  explicit PredictableCodeSizeScope(AssemblerBase* assembler);
   PredictableCodeSizeScope(AssemblerBase* assembler, int expected_size);
   ~PredictableCodeSizeScope();
+  void ExpectSize(int expected_size) { expected_size_ = expected_size; }
 
  private:
   AssemblerBase* assembler_;
@@ -222,17 +233,18 @@ class CpuFeatures : public AllStatic {
   static void PrintTarget();
   static void PrintFeatures();
 
+ private:
+  friend class ExternalReference;
+  friend class AssemblerBase;
   // Flush instruction cache.
   static void FlushICache(void* start, size_t size);
 
- private:
   // Platform-dependent implementation.
   static void ProbeImpl(bool cross_compile);
 
   static unsigned supported_;
   static unsigned cache_line_size_;
   static bool initialized_;
-  friend class ExternalReference;
   DISALLOW_COPY_AND_ASSIGN(CpuFeatures);
 };
 
@@ -312,6 +324,8 @@ class Label {
 
 enum SaveFPRegsMode { kDontSaveFPRegs, kSaveFPRegs };
 
+enum ArgvMode { kArgvOnStack, kArgvInRegister };
+
 // Specifies whether to perform icache flush operations on RelocInfo updates.
 // If FLUSH_ICACHE_IF_NEEDED, the icache will always be flushed if an
 // instruction was modified. If SKIP_ICACHE_FLUSH the flush will always be
@@ -349,10 +363,9 @@ class RelocInfo {
   // we do not normally record relocation info.
   static const char* const kFillerCommentString;
 
-  // The minimum size of a comment is equal to three bytes for the extra tagged
-  // pc + the tag for the data, and kPointerSize for the actual pointer to the
-  // comment.
-  static const int kMinRelocCommentSize = 3 + kPointerSize;
+  // The minimum size of a comment is equal to two bytes for the extra tagged
+  // pc and kPointerSize for the actual pointer to the comment.
+  static const int kMinRelocCommentSize = 2 + kPointerSize;
 
   // The maximum size for a call instruction including pc-jump.
   static const int kMaxCallSize = 6;
@@ -364,23 +377,29 @@ class RelocInfo {
     // Please note the order is important (see IsCodeTarget, IsGCRelocMode).
     CODE_TARGET,  // Code target which is not any of the above.
     CODE_TARGET_WITH_ID,
-    CONSTRUCT_CALL,  // code target that is a call to a JavaScript constructor.
-    DEBUG_BREAK,     // Code target for the debugger statement.
+    DEBUGGER_STATEMENT,  // Code target for the debugger statement.
     EMBEDDED_OBJECT,
     CELL,
 
     // Everything after runtime_entry (inclusive) is not GC'ed.
     RUNTIME_ENTRY,
-    JS_RETURN,  // Marks start of the ExitJSFrame code.
     COMMENT,
     POSITION,            // See comment for kNoPosition above.
     STATEMENT_POSITION,  // See comment for kNoPosition above.
-    DEBUG_BREAK_SLOT,    // Additional code inserted for debug break slot.
+
+    // Additional code inserted for debug break slot.
+    DEBUG_BREAK_SLOT_AT_POSITION,
+    DEBUG_BREAK_SLOT_AT_RETURN,
+    DEBUG_BREAK_SLOT_AT_CALL,
+
     EXTERNAL_REFERENCE,  // The address of an external C++ function.
     INTERNAL_REFERENCE,  // An address inside the same function.
 
     // Encoded internal reference, used only on MIPS, MIPS64 and PPC.
     INTERNAL_REFERENCE_ENCODED,
+
+    // Continuation points for a generator yield.
+    GENERATOR_CONTINUATION,
 
     // Marks constant and veneer pools. Only used on ARM and ARM64.
     // They use a custom noncompact encoding.
@@ -389,9 +408,12 @@ class RelocInfo {
 
     DEOPT_REASON,  // Deoptimization reason index.
 
-    // add more as needed
+    // This is not an actual reloc mode, but used to encode a long pc jump that
+    // cannot be encoded as part of another record.
+    PC_JUMP,
+
     // Pseudo-types
-    NUMBER_OF_MODES,    // There are at most 15 modes with noncompact encoding.
+    NUMBER_OF_MODES,
     NONE32,             // never recorded 32-bit value
     NONE64,             // never recorded 64-bit value
     CODE_AGE_SEQUENCE,  // Not stored in RelocInfo array, used explictly by
@@ -399,32 +421,24 @@ class RelocInfo {
 
     FIRST_REAL_RELOC_MODE = CODE_TARGET,
     LAST_REAL_RELOC_MODE = VENEER_POOL,
-    FIRST_PSEUDO_RELOC_MODE = CODE_AGE_SEQUENCE,
-    LAST_PSEUDO_RELOC_MODE = CODE_AGE_SEQUENCE,
-    LAST_CODE_ENUM = DEBUG_BREAK,
+    LAST_CODE_ENUM = DEBUGGER_STATEMENT,
     LAST_GCED_ENUM = CELL,
-    // Modes <= LAST_COMPACT_ENUM are guaranteed to have compact encoding.
-    LAST_COMPACT_ENUM = CODE_TARGET_WITH_ID,
-    LAST_STANDARD_NONCOMPACT_ENUM = INTERNAL_REFERENCE_ENCODED
   };
 
-  RelocInfo() {}
+  STATIC_ASSERT(NUMBER_OF_MODES <= kBitsPerInt);
 
-  RelocInfo(byte* pc, Mode rmode, intptr_t data, Code* host)
-      : pc_(pc), rmode_(rmode), data_(data), host_(host) {
+  explicit RelocInfo(Isolate* isolate) : isolate_(isolate) {
+    DCHECK_NOT_NULL(isolate);
+  }
+
+  RelocInfo(Isolate* isolate, byte* pc, Mode rmode, intptr_t data, Code* host)
+      : isolate_(isolate), pc_(pc), rmode_(rmode), data_(data), host_(host) {
+    DCHECK_NOT_NULL(isolate);
   }
 
   static inline bool IsRealRelocMode(Mode mode) {
     return mode >= FIRST_REAL_RELOC_MODE &&
         mode <= LAST_REAL_RELOC_MODE;
-  }
-  static inline bool IsPseudoRelocMode(Mode mode) {
-    DCHECK(!IsRealRelocMode(mode));
-    return mode >= FIRST_PSEUDO_RELOC_MODE &&
-        mode <= LAST_PSEUDO_RELOC_MODE;
-  }
-  static inline bool IsConstructCall(Mode mode) {
-    return mode == CONSTRUCT_CALL;
   }
   static inline bool IsCodeTarget(Mode mode) {
     return mode <= LAST_CODE_ENUM;
@@ -439,9 +453,6 @@ class RelocInfo {
   // Is the relocation mode affected by GC?
   static inline bool IsGCRelocMode(Mode mode) {
     return mode <= LAST_GCED_ENUM;
-  }
-  static inline bool IsJSReturn(Mode mode) {
-    return mode == JS_RETURN;
   }
   static inline bool IsComment(Mode mode) {
     return mode == COMMENT;
@@ -471,10 +482,20 @@ class RelocInfo {
     return mode == INTERNAL_REFERENCE_ENCODED;
   }
   static inline bool IsDebugBreakSlot(Mode mode) {
-    return mode == DEBUG_BREAK_SLOT;
+    return IsDebugBreakSlotAtPosition(mode) || IsDebugBreakSlotAtReturn(mode) ||
+           IsDebugBreakSlotAtCall(mode);
+  }
+  static inline bool IsDebugBreakSlotAtPosition(Mode mode) {
+    return mode == DEBUG_BREAK_SLOT_AT_POSITION;
+  }
+  static inline bool IsDebugBreakSlotAtReturn(Mode mode) {
+    return mode == DEBUG_BREAK_SLOT_AT_RETURN;
+  }
+  static inline bool IsDebugBreakSlotAtCall(Mode mode) {
+    return mode == DEBUG_BREAK_SLOT_AT_CALL;
   }
   static inline bool IsDebuggerStatement(Mode mode) {
-    return mode == DEBUG_BREAK;
+    return mode == DEBUGGER_STATEMENT;
   }
   static inline bool IsNone(Mode mode) {
     return mode == NONE32 || mode == NONE64;
@@ -482,9 +503,13 @@ class RelocInfo {
   static inline bool IsCodeAgeSequence(Mode mode) {
     return mode == CODE_AGE_SEQUENCE;
   }
+  static inline bool IsGeneratorContinuation(Mode mode) {
+    return mode == GENERATOR_CONTINUATION;
+  }
   static inline int ModeMask(Mode mode) { return 1 << mode; }
 
   // Accessors
+  Isolate* isolate() const { return isolate_; }
   byte* pc() const { return pc_; }
   void set_pc(byte* pc) { pc_ = pc; }
   Mode rmode() const {  return rmode_; }
@@ -492,10 +517,11 @@ class RelocInfo {
   Code* host() const { return host_; }
   void set_host(Code* host) { host_ = host; }
 
-  // Apply a relocation by delta bytes
-  INLINE(void apply(intptr_t delta,
-                    ICacheFlushMode icache_flush_mode =
-                        FLUSH_ICACHE_IF_NEEDED));
+  // Apply a relocation by delta bytes. When the code object is moved, PC
+  // relative addresses have to be updated as well as absolute addresses
+  // inside the code (internal references).
+  // Do not forget to flush the icache afterwards!
+  INLINE(void apply(intptr_t delta));
 
   // Is the pointer this relocation info refers to coded like a plain pointer
   // or is it strange in some way (e.g. relative or patched into a series of
@@ -506,7 +532,6 @@ class RelocInfo {
   // constant pool, otherwise the pointer is embedded in the instruction stream.
   bool IsInConstantPool();
 
-  // Read/modify the code target in the branch/call instruction
   // this relocation applies to;
   // can only be called if IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_)
   INLINE(Address target_address());
@@ -579,11 +604,8 @@ class RelocInfo {
   // Read/modify the address of a call instruction. This is used to relocate
   // the break points where straight-line code is patched with a call
   // instruction.
-  INLINE(Address call_address());
-  INLINE(void set_call_address(Address target));
-  INLINE(Object* call_object());
-  INLINE(void set_call_object(Object* target));
-  INLINE(Object** call_object_address());
+  INLINE(Address debug_call_address());
+  INLINE(void set_debug_call_address(Address target));
 
   // Wipe out a relocation to a fixed value, used for making snapshots
   // reproducible.
@@ -591,9 +613,6 @@ class RelocInfo {
 
   template<typename StaticVisitor> inline void Visit(Heap* heap);
   inline void Visit(Isolate* isolate, ObjectVisitor* v);
-
-  // Patch the code with a call.
-  void PatchCodeWithCall(Address target, int guard_bytes);
 
   // Check whether this return sequence has been patched
   // with a call to the debugger.
@@ -622,9 +641,13 @@ class RelocInfo {
   static const int kPositionMask = 1 << POSITION | 1 << STATEMENT_POSITION;
   static const int kDataMask =
       (1 << CODE_TARGET_WITH_ID) | kPositionMask | (1 << COMMENT);
-  static const int kApplyMask;  // Modes affected by apply. Depends on arch.
+  static const int kDebugBreakSlotMask = 1 << DEBUG_BREAK_SLOT_AT_POSITION |
+                                         1 << DEBUG_BREAK_SLOT_AT_RETURN |
+                                         1 << DEBUG_BREAK_SLOT_AT_CALL;
+  static const int kApplyMask;  // Modes affected by apply.  Depends on arch.
 
  private:
+  Isolate* isolate_;
   // On ARM, note that pc_ is the address of the constant pool entry
   // to be relocated and not the address of the instruction
   // referencing the constant pool entry (except when rmode_ ==
@@ -633,11 +656,6 @@ class RelocInfo {
   Mode rmode_;
   intptr_t data_;
   Code* host_;
-  // External-reference pointers are also split across instruction-pairs
-  // on some platforms, but are accessed via indirect pointers. This location
-  // provides a place for that pointer to exist naturally. Its address
-  // is returned by RelocInfo::target_reference_address().
-  Address reconstructed_adr_ptr_;
   friend class RelocIterator;
 };
 
@@ -680,21 +698,22 @@ class RelocInfoWriter BASE_EMBEDDED {
   void Finish() { FlushPosition(); }
 
   // Max size (bytes) of a written RelocInfo. Longest encoding is
-  // ExtraTag, VariableLengthPCJump, ExtraTag, pc_delta, ExtraTag, data_delta.
-  // On ia32 and arm this is 1 + 4 + 1 + 1 + 1 + 4 = 12.
-  // On x64 this is 1 + 4 + 1 + 1 + 1 + 8 == 16;
+  // ExtraTag, VariableLengthPCJump, ExtraTag, pc_delta, data_delta.
+  // On ia32 and arm this is 1 + 4 + 1 + 1 + 4 = 11.
+  // On x64 this is 1 + 4 + 1 + 1 + 8 == 15;
   // Here we use the maximum of the two.
-  static const int kMaxSize = 16;
+  static const int kMaxSize = 15;
 
  private:
-  inline uint32_t WriteVariableLengthPCJump(uint32_t pc_delta);
-  inline void WriteTaggedPC(uint32_t pc_delta, int tag);
-  inline void WriteExtraTaggedPC(uint32_t pc_delta, int extra_tag);
-  inline void WriteExtraTaggedIntData(int data_delta, int top_tag);
-  inline void WriteExtraTaggedPoolData(int data, int pool_type);
-  inline void WriteExtraTaggedData(intptr_t data_delta, int top_tag);
-  inline void WriteTaggedData(intptr_t data_delta, int tag);
-  inline void WriteExtraTag(int extra_tag, int top_tag);
+  inline uint32_t WriteLongPCJump(uint32_t pc_delta);
+
+  inline void WriteShortTaggedPC(uint32_t pc_delta, int tag);
+  inline void WriteShortTaggedData(intptr_t data_delta, int tag);
+
+  inline void WriteMode(RelocInfo::Mode rmode);
+  inline void WriteModeAndPC(uint32_t pc_delta, RelocInfo::Mode rmode);
+  inline void WriteIntData(int data_delta);
+  inline void WriteData(intptr_t data_delta);
   inline void WritePosition(int pc_delta, int pos_delta, RelocInfo::Mode rmode);
 
   void FlushPosition();
@@ -745,19 +764,21 @@ class RelocIterator: public Malloced {
   // *Get* just reads and returns info on current byte.
   void Advance(int bytes = 1) { pos_ -= bytes; }
   int AdvanceGetTag();
-  int GetExtraTag();
-  int GetTopTag();
-  void ReadTaggedPC();
+  RelocInfo::Mode GetMode();
+
+  void AdvanceReadLongPCJump();
+
+  int GetShortDataTypeTag();
+  void ReadShortTaggedPC();
+  void ReadShortTaggedId();
+  void ReadShortTaggedPosition();
+  void ReadShortTaggedData();
+
   void AdvanceReadPC();
   void AdvanceReadId();
-  void AdvanceReadPoolData();
+  void AdvanceReadInt();
   void AdvanceReadPosition();
   void AdvanceReadData();
-  void AdvanceReadVariableLengthPCJump();
-  int GetLocatableTypeTag();
-  void ReadTaggedId();
-  void ReadTaggedPosition();
-  void ReadTaggedData();
 
   // If the given mode is wanted, set it in rinfo_ and return true.
   // Else return false. Used for efficiently skipping unwanted modes.
@@ -781,7 +802,6 @@ class RelocIterator: public Malloced {
 // External function
 
 //----------------------------------------------------------------------------
-class IC_Utility;
 class SCTableReference;
 class Debug_Address;
 
@@ -837,7 +857,8 @@ class ExternalReference BASE_EMBEDDED {
   static void InitializeMathExpData();
   static void TearDownMathExpData();
 
-  typedef void* ExternalReferenceRedirector(void* original, Type type);
+  typedef void* ExternalReferenceRedirector(Isolate* isolate, void* original,
+                                            Type type);
 
   ExternalReference() : address_(NULL) {}
 
@@ -850,8 +871,6 @@ class ExternalReference BASE_EMBEDDED {
   ExternalReference(Runtime::FunctionId id, Isolate* isolate);
 
   ExternalReference(const Runtime::Function* f, Isolate* isolate);
-
-  ExternalReference(const IC_Utility& ic_utility, Isolate* isolate);
 
   explicit ExternalReference(StatsCounter* counter);
 
@@ -870,7 +889,6 @@ class ExternalReference BASE_EMBEDDED {
       Isolate* isolate);
   static ExternalReference store_buffer_overflow_function(
       Isolate* isolate);
-  static ExternalReference flush_icache_function(Isolate* isolate);
   static ExternalReference delete_handle_scope_extensions(Isolate* isolate);
 
   static ExternalReference get_date_field_function(Isolate* isolate);
@@ -958,20 +976,20 @@ class ExternalReference BASE_EMBEDDED {
 
   static ExternalReference debug_is_active_address(Isolate* isolate);
   static ExternalReference debug_after_break_target_address(Isolate* isolate);
-  static ExternalReference debug_restarter_frame_function_pointer_address(
-      Isolate* isolate);
 
   static ExternalReference is_profiling_address(Isolate* isolate);
   static ExternalReference invoke_function_callback(Isolate* isolate);
   static ExternalReference invoke_accessor_getter_callback(Isolate* isolate);
 
+  static ExternalReference virtual_handler_register(Isolate* isolate);
+  static ExternalReference virtual_slot_register(Isolate* isolate);
+
+  static ExternalReference runtime_function_table_address(Isolate* isolate);
+
   Address address() const { return reinterpret_cast<Address>(address_); }
 
-  // Function Debug::Break()
-  static ExternalReference debug_break(Isolate* isolate);
-
   // Used to check if single stepping is enabled in generated code.
-  static ExternalReference debug_step_in_fp_address(Isolate* isolate);
+  static ExternalReference debug_step_in_enabled_address(Isolate* isolate);
 
 #ifndef V8_INTERPRETED_REGEXP
   // C functions called from RegExp generated code.
@@ -1002,6 +1020,8 @@ class ExternalReference BASE_EMBEDDED {
 
   static ExternalReference stress_deopt_count(Isolate* isolate);
 
+  static ExternalReference fixed_typed_array_base_data_offset();
+
  private:
   explicit ExternalReference(void* address)
       : address_(address) {}
@@ -1013,9 +1033,8 @@ class ExternalReference BASE_EMBEDDED {
         reinterpret_cast<ExternalReferenceRedirector*>(
             isolate->external_reference_redirector());
     void* address = reinterpret_cast<void*>(address_arg);
-    void* answer = (redirector == NULL) ?
-                   address :
-                   (*redirector)(address, type);
+    void* answer =
+        (redirector == NULL) ? address : (*redirector)(isolate, address, type);
     return answer;
   }
 
@@ -1104,7 +1123,7 @@ inline int NumberOfBitsSet(uint32_t x) {
 bool EvalComparison(Token::Value op, double op1, double op2);
 
 // Computes pow(x, y) with the special cases in the spec for Math.pow.
-double power_helper(double x, double y);
+double power_helper(Isolate* isolate, double x, double y);
 double power_double_int(double x, int y);
 double power_double_double(double x, double y);
 
@@ -1120,7 +1139,10 @@ class CallWrapper {
   virtual void BeforeCall(int call_size) const = 0;
   // Called just after emitting a call, i.e., at the return site for the call.
   virtual void AfterCall() const = 0;
+  // Return whether call needs to check for debug stepping.
+  virtual bool NeedsDebugStepCheck() const { return false; }
 };
+
 
 class NullCallWrapper : public CallWrapper {
  public:
@@ -1128,6 +1150,16 @@ class NullCallWrapper : public CallWrapper {
   virtual ~NullCallWrapper() { }
   virtual void BeforeCall(int call_size) const { }
   virtual void AfterCall() const { }
+};
+
+
+class CheckDebugStepCallWrapper : public CallWrapper {
+ public:
+  CheckDebugStepCallWrapper() {}
+  virtual ~CheckDebugStepCallWrapper() {}
+  virtual void BeforeCall(int call_size) const {}
+  virtual void AfterCall() const {}
+  virtual bool NeedsDebugStepCheck() const { return true; }
 };
 
 
@@ -1250,7 +1282,6 @@ class ConstantPoolBuilder BASE_EMBEDDED {
   PerTypeEntryInfo info_[ConstantPoolEntry::NUMBER_OF_TYPES];
 };
 
-
-} }  // namespace v8::internal
-
+}  // namespace internal
+}  // namespace v8
 #endif  // V8_ASSEMBLER_H_

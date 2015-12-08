@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #if V8_TARGET_ARCH_MIPS
 
 #include "src/interface-descriptors.h"
@@ -33,18 +31,36 @@ const Register VectorStoreICTrampolineDescriptor::SlotRegister() { return t0; }
 const Register VectorStoreICDescriptor::VectorRegister() { return a3; }
 
 
+const Register VectorStoreTransitionDescriptor::SlotRegister() { return t0; }
+const Register VectorStoreTransitionDescriptor::VectorRegister() { return a3; }
+const Register VectorStoreTransitionDescriptor::MapRegister() { return t1; }
+
+
 const Register StoreTransitionDescriptor::MapRegister() { return a3; }
 
 
-const Register ElementTransitionAndStoreDescriptor::MapRegister() { return a3; }
+const Register LoadGlobalViaContextDescriptor::SlotRegister() { return a2; }
 
 
-const Register InstanceofDescriptor::left() { return a0; }
-const Register InstanceofDescriptor::right() { return a1; }
+const Register StoreGlobalViaContextDescriptor::SlotRegister() { return a2; }
+const Register StoreGlobalViaContextDescriptor::ValueRegister() { return a0; }
+
+
+const Register InstanceOfDescriptor::LeftRegister() { return a1; }
+const Register InstanceOfDescriptor::RightRegister() { return a0; }
+
+
+const Register StringCompareDescriptor::LeftRegister() { return a1; }
+const Register StringCompareDescriptor::RightRegister() { return a0; }
 
 
 const Register ArgumentsAccessReadDescriptor::index() { return a1; }
 const Register ArgumentsAccessReadDescriptor::parameter_count() { return a0; }
+
+
+const Register ArgumentsAccessNewDescriptor::function() { return a1; }
+const Register ArgumentsAccessNewDescriptor::parameter_count() { return a2; }
+const Register ArgumentsAccessNewDescriptor::parameter_pointer() { return a3; }
 
 
 const Register ApiGetterDescriptor::function_address() { return a2; }
@@ -83,6 +99,18 @@ void ToNumberDescriptor::InitializePlatformSpecific(
 }
 
 
+// static
+const Register ToLengthDescriptor::ReceiverRegister() { return a0; }
+
+
+// static
+const Register ToStringDescriptor::ReceiverRegister() { return a0; }
+
+
+// static
+const Register ToObjectDescriptor::ReceiverRegister() { return a0; }
+
+
 void NumberToStringDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {a0};
@@ -94,6 +122,13 @@ void TypeofDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {a3};
   data->InitializePlatformSpecific(arraysize(registers), registers, NULL);
+}
+
+
+void FastCloneRegExpDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {a3, a2, a1, a0};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 
@@ -158,12 +193,31 @@ void CallConstructDescriptor::InitializePlatformSpecific(
   // a0 : number of arguments
   // a1 : the function to call
   // a2 : feedback vector
-  // a3 : (only if a2 is not the megamorphic symbol) slot in feedback
-  //      vector (Smi)
+  // a3 : slot in feedback vector (Smi, for RecordCallTarget)
+  // t0 : new target (for IsSuperConstructorCall)
   // TODO(turbofan): So far we don't gather type feedback and hence skip the
   // slot parameter, but ArrayConstructStub needs the vector to be undefined.
-  Register registers[] = {a0, a1, a2};
+  Register registers[] = {a0, a1, t0, a2};
   data->InitializePlatformSpecific(arraysize(registers), registers, NULL);
+}
+
+
+void CallTrampolineDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // a1: target
+  // a0: number of arguments
+  Register registers[] = {a1, a0};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void ConstructTrampolineDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // a1: target
+  // a3: new target
+  // a0: number of arguments
+  Register registers[] = {a1, a3, a0};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 
@@ -185,6 +239,13 @@ void AllocateHeapNumberDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   // register state
   data->InitializePlatformSpecific(0, nullptr, nullptr);
+}
+
+
+void AllocateInNewSpaceDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {a0};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 
@@ -298,6 +359,7 @@ void ArgumentAdaptorDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {
       a1,  // JSFunction
+      a3,  // the new target
       a0,  // actual number of arguments
       a2,  // expected number of arguments
   };
@@ -330,14 +392,39 @@ void ApiAccessorDescriptor::InitializePlatformSpecific(
 }
 
 
-void MathRoundVariantDescriptor::InitializePlatformSpecific(
+void InterpreterPushArgsAndCallDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {
-      a1,  // math rounding function
-      a3,  // vector slot id
+      a0,  // argument count (not including receiver)
+      a2,  // address of first argument
+      a1   // the target callable to be call
   };
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
+
+
+void InterpreterPushArgsAndConstructDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      a0,  // argument count (not including receiver)
+      a3,  // new target
+      a1,  // constructor to call
+      a2   // address of the first argument
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void InterpreterCEntryDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      a0,  // argument count (argc)
+      a2,  // address of first argument (argv)
+      a1   // the runtime function to call
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
 }  // namespace internal
 }  // namespace v8
 

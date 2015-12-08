@@ -25,11 +25,16 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+// TODO(jochen): Remove this after the setting is turned on globally.
+#define V8_IMMINENT_DEPRECATION_WARNINGS
+
 #include <stdlib.h>
+#include <iostream>  // NOLINT(readability/streams)
 
 #include "src/v8.h"
 #include "test/cctest/cctest.h"
 
+#include "src/base/utils/random-number-generator.h"
 #include "src/macro-assembler.h"
 #include "src/mips64/macro-assembler-mips64.h"
 #include "src/mips64/simulator-mips64.h"
@@ -38,6 +43,7 @@
 using namespace v8::internal;
 
 typedef void* (*F)(int64_t x, int64_t y, int p2, int p3, int p4);
+typedef Object* (*F1)(int x, int p1, int p2, int p3, int p4);
 
 #define __ masm->
 
@@ -60,7 +66,7 @@ static bool all_zeroes(const byte* beg, const byte* end) {
 
 TEST(CopyBytes) {
   CcTest::InitializeVM();
-  Isolate* isolate = Isolate::Current();
+  Isolate* isolate = CcTest::i_isolate();
   HandleScope handles(isolate);
 
   const int data_size = 1 * KB;
@@ -80,7 +86,8 @@ TEST(CopyBytes) {
   byte* a0_;
   byte* a1_;
 
-  MacroAssembler assembler(isolate, NULL, 0);
+  MacroAssembler assembler(isolate, NULL, 0,
+                           v8::internal::CodeObjectRequired::kYes);
   MacroAssembler* masm = &assembler;
 
   // Code to be generated: The stuff in CopyBytes followed by a store of a0 and
@@ -111,9 +118,8 @@ TEST(CopyBytes) {
       for (byte* dest = dest_buffer; dest < dest_buffer + fuzz; dest++) {
         memset(dest_buffer, 0, data_size);
         CHECK(dest + size < dest_buffer + data_size);
-        (void) CALL_GENERATED_CODE(f, reinterpret_cast<int64_t>(src),
-                                      reinterpret_cast<int64_t>(dest),
-                                      size, 0, 0);
+        (void)CALL_GENERATED_CODE(isolate, f, reinterpret_cast<int64_t>(src),
+                                  reinterpret_cast<int64_t>(dest), size, 0, 0);
         // a0 and a1 should point at the first byte after the copied data.
         CHECK_EQ(src + size, a0_);
         CHECK_EQ(dest + size, a1_);
@@ -135,7 +141,7 @@ TEST(CopyBytes) {
 
 TEST(LoadConstants) {
   CcTest::InitializeVM();
-  Isolate* isolate = Isolate::Current();
+  Isolate* isolate = CcTest::i_isolate();
   HandleScope handles(isolate);
 
   int64_t refConstants[64];
@@ -146,7 +152,8 @@ TEST(LoadConstants) {
     refConstants[i] = ~(mask << i);
   }
 
-  MacroAssembler assembler(isolate, NULL, 0);
+  MacroAssembler assembler(isolate, NULL, 0,
+                           v8::internal::CodeObjectRequired::kYes);
   MacroAssembler* masm = &assembler;
 
   __ mov(a4, a0);
@@ -166,8 +173,8 @@ TEST(LoadConstants) {
       desc, Code::ComputeFlags(Code::STUB), Handle<Code>());
 
   ::F f = FUNCTION_CAST< ::F>(code->entry());
-     (void) CALL_GENERATED_CODE(f, reinterpret_cast<int64_t>(result),
-                                0, 0, 0, 0);
+  (void)CALL_GENERATED_CODE(isolate, f, reinterpret_cast<int64_t>(result), 0, 0,
+                            0, 0);
   // Check results.
   for (int i = 0; i < 64; i++) {
     CHECK(refConstants[i] == result[i]);
@@ -177,10 +184,11 @@ TEST(LoadConstants) {
 
 TEST(LoadAddress) {
   CcTest::InitializeVM();
-  Isolate* isolate = Isolate::Current();
+  Isolate* isolate = CcTest::i_isolate();
   HandleScope handles(isolate);
 
-  MacroAssembler assembler(isolate, NULL, 0);
+  MacroAssembler assembler(isolate, NULL, 0,
+                           v8::internal::CodeObjectRequired::kYes);
   MacroAssembler* masm = &assembler;
   Label to_jump, skip;
   __ mov(a4, a0);
@@ -210,8 +218,95 @@ TEST(LoadAddress) {
       desc, Code::ComputeFlags(Code::STUB), Handle<Code>());
 
   ::F f = FUNCTION_CAST< ::F>(code->entry());
-     (void) CALL_GENERATED_CODE(f, 0, 0, 0, 0, 0);
+  (void)CALL_GENERATED_CODE(isolate, f, 0, 0, 0, 0, 0);
   // Check results.
+}
+
+
+TEST(jump_tables4) {
+  // Similar to test-assembler-mips jump_tables1, with extra test for branch
+  // trampoline required before emission of the dd table (where trampolines are
+  // blocked), and proper transition to long-branch mode.
+  // Regression test for v8:4294.
+  CcTest::InitializeVM();
+  Isolate* isolate = CcTest::i_isolate();
+  HandleScope scope(isolate);
+  MacroAssembler assembler(isolate, NULL, 0,
+                           v8::internal::CodeObjectRequired::kYes);
+  MacroAssembler* masm = &assembler;
+
+  const int kNumCases = 512;
+  int values[kNumCases];
+  isolate->random_number_generator()->NextBytes(values, sizeof(values));
+  Label labels[kNumCases];
+  Label near_start, end;
+
+  __ daddiu(sp, sp, -8);
+  __ sd(ra, MemOperand(sp));
+  if ((masm->pc_offset() & 7) == 0) {
+    __ nop();
+  }
+
+  __ mov(v0, zero_reg);
+
+  __ Branch(&end);
+  __ bind(&near_start);
+
+  // Generate slightly less than 32K instructions, which will soon require
+  // trampoline for branch distance fixup.
+  for (int i = 0; i < 32768 - 256; ++i) {
+    __ addiu(v0, v0, 1);
+  }
+
+  Label done;
+  {
+    __ BlockTrampolinePoolFor(kNumCases * 2 + 6);
+    PredictableCodeSizeScope predictable(
+        masm, (kNumCases * 2 + 6) * Assembler::kInstrSize);
+    Label here;
+
+    __ bal(&here);
+    __ dsll(at, a0, 3);  // In delay slot.
+    __ bind(&here);
+    __ daddu(at, at, ra);
+    __ ld(at, MemOperand(at, 4 * Assembler::kInstrSize));
+    __ jr(at);
+    __ nop();  // Branch delay slot nop.
+    for (int i = 0; i < kNumCases; ++i) {
+      __ dd(&labels[i]);
+    }
+  }
+
+  for (int i = 0; i < kNumCases; ++i) {
+    __ bind(&labels[i]);
+    __ lui(v0, (values[i] >> 16) & 0xffff);
+    __ ori(v0, v0, values[i] & 0xffff);
+    __ Branch(&done);
+  }
+
+  __ bind(&done);
+  __ ld(ra, MemOperand(sp));
+  __ daddiu(sp, sp, 8);
+  __ jr(ra);
+  __ nop();
+
+  __ bind(&end);
+  __ Branch(&near_start);
+
+  CodeDesc desc;
+  masm->GetCode(&desc);
+  Handle<Code> code = isolate->factory()->NewCode(
+      desc, Code::ComputeFlags(Code::STUB), Handle<Code>());
+#ifdef OBJECT_PRINT
+  code->Print(std::cout);
+#endif
+  F1 f = FUNCTION_CAST<F1>(code->entry());
+  for (int i = 0; i < kNumCases; ++i) {
+    int64_t res = reinterpret_cast<int64_t>(
+        CALL_GENERATED_CODE(isolate, f, i, 0, 0, 0, 0));
+    ::printf("f(%d) = %" PRId64 "\n", i, res);
+    CHECK_EQ(values[i], res);
+  }
 }
 
 #undef __

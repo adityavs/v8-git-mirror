@@ -25,11 +25,14 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+// TODO(jochen): Remove this after the setting is turned on globally.
+#define V8_IMMINENT_DEPRECATION_WARNINGS
+
 #include "src/v8.h"
 #include "test/cctest/cctest.h"
 
 #include "src/api.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/execution.h"
 #include "src/factory.h"
 #include "src/global-handles.h"
@@ -171,12 +174,6 @@ static void TestHashSetCausesGC(Handle<HashSet> table) {
   Factory* factory = isolate->factory();
 
   Handle<JSObject> key = factory->NewJSArray(0);
-  v8::Handle<v8::Object> key_obj = v8::Utils::ToLocal(key);
-
-  // Force allocation of hash table backing store for hidden properties.
-  key_obj->SetHiddenValue(v8_str("key 1"), v8_str("val 1"));
-  key_obj->SetHiddenValue(v8_str("key 2"), v8_str("val 2"));
-  key_obj->SetHiddenValue(v8_str("key 3"), v8_str("val 3"));
 
   // Simulate a full heap so that generating an identity hash code
   // in subsequent calls will request GC.
@@ -208,12 +205,6 @@ static void TestHashMapCausesGC(Handle<HashMap> table) {
   Factory* factory = isolate->factory();
 
   Handle<JSObject> key = factory->NewJSArray(0);
-  v8::Handle<v8::Object> key_obj = v8::Utils::ToLocal(key);
-
-  // Force allocation of hash table backing store for hidden properties.
-  key_obj->SetHiddenValue(v8_str("key 1"), v8_str("val 1"));
-  key_obj->SetHiddenValue(v8_str("key 2"), v8_str("val 2"));
-  key_obj->SetHiddenValue(v8_str("key 3"), v8_str("val 3"));
 
   // Simulate a full heap so that generating an identity hash code
   // in subsequent calls will request GC.
@@ -239,4 +230,4 @@ TEST(ObjectHashTableCausesGC) {
 }
 #endif
 
-}
+}  // namespace

@@ -27,9 +27,12 @@
 //
 // Tests of the circular queue.
 
+// TODO(jochen): Remove this after the setting is turned on globally.
+#define V8_IMMINENT_DEPRECATION_WARNINGS
+
 #include "src/v8.h"
 
-#include "src/circular-queue-inl.h"
+#include "src/profiler/circular-queue-inl.h"
 #include "test/cctest/cctest.h"
 
 using i::SamplingCircularQueue;

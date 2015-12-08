@@ -26,11 +26,14 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 
+// TODO(jochen): Remove this after the setting is turned on globally.
+#define V8_IMMINENT_DEPRECATION_WARNINGS
+
 #include <stdlib.h>
 
 #include "src/v8.h"
 
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/disasm.h"
 #include "src/disassembler.h"
 #include "src/macro-assembler.h"
@@ -98,7 +101,7 @@ if (failure) { \
     byte *progcounter = &buffer[pc_offset];                                    \
     char str_with_address[100];                                                \
     snprintf(str_with_address, sizeof(str_with_address), "%s -> %p",           \
-             compare_string, progcounter + 4 + (offset << 2));                 \
+             compare_string, progcounter + 4 + (offset * 4));                  \
     assm.asm_;                                                                 \
     if (!DisassembleAndCompare(progcounter, str_with_address)) failure = true; \
   }
@@ -110,7 +113,7 @@ if (failure) { \
     byte *progcounter = &buffer[pc_offset];                                    \
     char str_with_address[100];                                                \
     snprintf(str_with_address, sizeof(str_with_address), "%s -> %p",           \
-             compare_string, progcounter + (offset << 2));                     \
+             compare_string, progcounter + (offset * 4));                      \
     assm.asm_;                                                                 \
     if (!DisassembleAndCompare(progcounter, str_with_address)) failure = true; \
   }
@@ -121,13 +124,22 @@ if (failure) { \
     int pc_offset = assm.pc_offset();                                          \
     byte *progcounter = &buffer[pc_offset];                                    \
     char str_with_address[100];                                                \
-    int instr_index = target >> 2;                                             \
-    snprintf(str_with_address, sizeof(str_with_address), "%s -> %p",           \
-             compare_string, reinterpret_cast<byte *>(                         \
-                                 ((uint64_t)(progcounter + 1) & ~0xfffffff) |  \
+    int instr_index = (target >> 2) & kImm26Mask;                              \
+    snprintf(                                                                  \
+        str_with_address, sizeof(str_with_address), "%s %p -> %p",             \
+        compare_string, reinterpret_cast<byte *>(target),                      \
+        reinterpret_cast<byte *>(((uint64_t)(progcounter + 1) & ~0xfffffff) |  \
                                  (instr_index << 2)));                         \
     assm.asm_;                                                                 \
     if (!DisassembleAndCompare(progcounter, str_with_address)) failure = true; \
+  }
+
+
+#define GET_PC_REGION(pc_region)                                         \
+  {                                                                      \
+    int pc_offset = assm.pc_offset();                                    \
+    byte *progcounter = &buffer[pc_offset];                              \
+    pc_region = reinterpret_cast<int64_t>(progcounter + 4) & ~0xfffffff; \
   }
 
 
@@ -392,6 +404,20 @@ TEST(Type0) {
           "3c040001       lui     a0, 0x1");
   COMPARE(lui(v0, 0xffff),
           "3c02ffff       lui     v0, 0xffff");
+
+  if (kArchVariant == (kMips64r6)) {
+    COMPARE(aui(a0, a1, 0x1), "3ca40001       aui     a0, a1, 0x1");
+    COMPARE(aui(v0, v1, 0xffff), "3c62ffff       aui     v0, v1, 0xffff");
+
+    COMPARE(daui(a0, a1, 0x1), "74a40001       daui    a0, a1, 0x1");
+    COMPARE(daui(v0, v1, 0xffff), "7462ffff       daui    v0, v1, 0xffff");
+
+    COMPARE(dahi(a0, 0x1), "04860001       dahi    a0, 0x1");
+    COMPARE(dahi(v0, 0xffff), "0446ffff       dahi    v0, 0xffff");
+
+    COMPARE(dati(a0, 0x1), "049e0001       dati    a0, 0x1");
+    COMPARE(dati(v0, 0xffff), "045effff       dati    v0, 0xffff");
+  }
 
   COMPARE(sll(a0, a1, 0),
           "00052000       sll     a0, a1, 0");
@@ -1114,12 +1140,18 @@ TEST(Type3) {
   COMPARE_PC_REL_COMPACT(bgtz(a0, 32767), "1c807fff       bgtz    a0, 32767",
                          32767);
 
-  COMPARE_PC_JUMP(j(0x4), "08000001       j       0x4", 0x4);
-  COMPARE_PC_JUMP(j(0xffffffc), "0bffffff       j       0xffffffc", 0xffffffc);
+  int64_t pc_region;
+  GET_PC_REGION(pc_region);
 
-  COMPARE_PC_JUMP(jal(0x4), "0c000001       jal     0x4", 0x4);
-  COMPARE_PC_JUMP(jal(0xffffffc), "0fffffff       jal     0xffffffc",
-                  0xffffffc);
+  int64_t target = pc_region | 0x4;
+  COMPARE_PC_JUMP(j(target), "08000001       j      ", target);
+  target = pc_region | 0xffffffc;
+  COMPARE_PC_JUMP(j(target), "0bffffff       j      ", target);
+
+  target = pc_region | 0x4;
+  COMPARE_PC_JUMP(jal(target), "0c000001       jal    ", target);
+  target = pc_region | 0xffffffc;
+  COMPARE_PC_JUMP(jal(target), "0fffffff       jal    ", target);
 
   VERIFY_RUN();
 }
@@ -1222,5 +1254,15 @@ TEST(CVT_DISSASM) {
   COMPARE(cvt_s_d(f22, f24), "4620c5a0       cvt.s.d f22, f24");
   COMPARE(cvt_s_w(f22, f24), "4680c5a0       cvt.s.w f22, f24");
 
+  VERIFY_RUN();
+}
+
+
+TEST(ctc1_cfc1_disasm) {
+  SET_UP();
+  COMPARE(abs_d(f10, f31), "4620fa85       abs.d   f10, f31");
+  COMPARE(ceil_w_s(f8, f31), "4600fa0e       ceil.w.s f8, f31");
+  COMPARE(ctc1(a0, FCSR), "44c4f800       ctc1    a0, FCSR");
+  COMPARE(cfc1(a0, FCSR), "4444f800       cfc1    a0, FCSR");
   VERIFY_RUN();
 }

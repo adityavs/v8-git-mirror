@@ -218,6 +218,20 @@ const Conversion kConversionInstructions[] = {
       kMipsTruncUwD, kMachFloat64},
      kMachInt32}};
 
+const Conversion kFloat64RoundInstructions[] = {
+    {{&RawMachineAssembler::Float64RoundUp, "Float64RoundUp", kMipsCeilWD,
+      kMachFloat64},
+     kMachInt32},
+    {{&RawMachineAssembler::Float64RoundDown, "Float64RoundDown", kMipsFloorWD,
+      kMachFloat64},
+     kMachInt32},
+    {{&RawMachineAssembler::Float64RoundTiesEven, "Float64RoundTiesEven",
+      kMipsRoundWD, kMachFloat64},
+     kMachInt32},
+    {{&RawMachineAssembler::Float64RoundTruncate, "Float64RoundTruncate",
+      kMipsTruncWD, kMachFloat64},
+     kMachInt32}};
+
 }  // namespace
 
 
@@ -296,6 +310,65 @@ INSTANTIATE_TEST_CASE_P(InstructionSelectorTest, InstructionSelectorShiftTest,
                         ::testing::ValuesIn(kShiftInstructions));
 
 
+TEST_F(InstructionSelectorTest, Word32ShrWithWord32AndWithImmediate) {
+  // The available shift operand range is `0 <= imm < 32`, but we also test
+  // that immediates outside this range are handled properly (modulo-32).
+  TRACED_FORRANGE(int32_t, shift, -32, 63) {
+    int32_t lsb = shift & 0x1f;
+    TRACED_FORRANGE(int32_t, width, 1, 32 - lsb) {
+      uint32_t jnk = rng()->NextInt();
+      jnk = (lsb > 0) ? (jnk >> (32 - lsb)) : 0;
+      uint32_t msk = ((0xffffffffu >> (32 - width)) << lsb) | jnk;
+      StreamBuilder m(this, kMachInt32, kMachInt32);
+      m.Return(m.Word32Shr(m.Word32And(m.Parameter(0), m.Int32Constant(msk)),
+                           m.Int32Constant(shift)));
+      Stream s = m.Build();
+      ASSERT_EQ(1U, s.size());
+      EXPECT_EQ(kMipsExt, s[0]->arch_opcode());
+      ASSERT_EQ(3U, s[0]->InputCount());
+      EXPECT_EQ(lsb, s.ToInt32(s[0]->InputAt(1)));
+      EXPECT_EQ(width, s.ToInt32(s[0]->InputAt(2)));
+    }
+  }
+  TRACED_FORRANGE(int32_t, shift, -32, 63) {
+    int32_t lsb = shift & 0x1f;
+    TRACED_FORRANGE(int32_t, width, 1, 32 - lsb) {
+      uint32_t jnk = rng()->NextInt();
+      jnk = (lsb > 0) ? (jnk >> (32 - lsb)) : 0;
+      uint32_t msk = ((0xffffffffu >> (32 - width)) << lsb) | jnk;
+      StreamBuilder m(this, kMachInt32, kMachInt32);
+      m.Return(m.Word32Shr(m.Word32And(m.Int32Constant(msk), m.Parameter(0)),
+                           m.Int32Constant(shift)));
+      Stream s = m.Build();
+      ASSERT_EQ(1U, s.size());
+      EXPECT_EQ(kMipsExt, s[0]->arch_opcode());
+      ASSERT_EQ(3U, s[0]->InputCount());
+      EXPECT_EQ(lsb, s.ToInt32(s[0]->InputAt(1)));
+      EXPECT_EQ(width, s.ToInt32(s[0]->InputAt(2)));
+    }
+  }
+}
+
+
+TEST_F(InstructionSelectorTest, Word32ShlWithWord32And) {
+  TRACED_FORRANGE(int32_t, shift, 0, 30) {
+    StreamBuilder m(this, kMachInt32, kMachInt32);
+    Node* const p0 = m.Parameter(0);
+    Node* const r =
+        m.Word32Shl(m.Word32And(p0, m.Int32Constant((1 << (31 - shift)) - 1)),
+                    m.Int32Constant(shift + 1));
+    m.Return(r);
+    Stream s = m.Build();
+    ASSERT_EQ(1U, s.size());
+    EXPECT_EQ(kMipsShl, s[0]->arch_opcode());
+    ASSERT_EQ(2U, s[0]->InputCount());
+    EXPECT_EQ(s.ToVreg(p0), s.ToVreg(s[0]->InputAt(0)));
+    ASSERT_EQ(1U, s[0]->OutputCount());
+    EXPECT_EQ(s.ToVreg(r), s.ToVreg(s[0]->Output()));
+  }
+}
+
+
 // ----------------------------------------------------------------------------
 // Logical instructions.
 // ----------------------------------------------------------------------------
@@ -320,6 +393,117 @@ TEST_P(InstructionSelectorLogicalTest, Parameter) {
 
 INSTANTIATE_TEST_CASE_P(InstructionSelectorTest, InstructionSelectorLogicalTest,
                         ::testing::ValuesIn(kLogicalInstructions));
+
+
+TEST_F(InstructionSelectorTest, Word32XorMinusOneWithParameter) {
+  {
+    StreamBuilder m(this, kMachInt32, kMachInt32);
+    m.Return(m.Word32Xor(m.Parameter(0), m.Int32Constant(-1)));
+    Stream s = m.Build();
+    ASSERT_EQ(1U, s.size());
+    EXPECT_EQ(kMipsNor, s[0]->arch_opcode());
+    EXPECT_EQ(2U, s[0]->InputCount());
+    EXPECT_EQ(1U, s[0]->OutputCount());
+  }
+  {
+    StreamBuilder m(this, kMachInt32, kMachInt32);
+    m.Return(m.Word32Xor(m.Int32Constant(-1), m.Parameter(0)));
+    Stream s = m.Build();
+    ASSERT_EQ(1U, s.size());
+    EXPECT_EQ(kMipsNor, s[0]->arch_opcode());
+    EXPECT_EQ(2U, s[0]->InputCount());
+    EXPECT_EQ(1U, s[0]->OutputCount());
+  }
+}
+
+
+TEST_F(InstructionSelectorTest, Word32XorMinusOneWithWord32Or) {
+  {
+    StreamBuilder m(this, kMachInt32, kMachInt32);
+    m.Return(m.Word32Xor(m.Word32Or(m.Parameter(0), m.Parameter(0)),
+                         m.Int32Constant(-1)));
+    Stream s = m.Build();
+    ASSERT_EQ(1U, s.size());
+    EXPECT_EQ(kMipsNor, s[0]->arch_opcode());
+    EXPECT_EQ(2U, s[0]->InputCount());
+    EXPECT_EQ(1U, s[0]->OutputCount());
+  }
+  {
+    StreamBuilder m(this, kMachInt32, kMachInt32);
+    m.Return(m.Word32Xor(m.Int32Constant(-1),
+                         m.Word32Or(m.Parameter(0), m.Parameter(0))));
+    Stream s = m.Build();
+    ASSERT_EQ(1U, s.size());
+    EXPECT_EQ(kMipsNor, s[0]->arch_opcode());
+    EXPECT_EQ(2U, s[0]->InputCount());
+    EXPECT_EQ(1U, s[0]->OutputCount());
+  }
+}
+
+
+TEST_F(InstructionSelectorTest, Word32AndWithImmediateWithWord32Shr) {
+  // The available shift operand range is `0 <= imm < 32`, but we also test
+  // that immediates outside this range are handled properly (modulo-32).
+  TRACED_FORRANGE(int32_t, shift, -32, 63) {
+    int32_t lsb = shift & 0x1f;
+    TRACED_FORRANGE(int32_t, width, 1, 31) {
+      uint32_t msk = (1 << width) - 1;
+      StreamBuilder m(this, kMachInt32, kMachInt32);
+      m.Return(m.Word32And(m.Word32Shr(m.Parameter(0), m.Int32Constant(shift)),
+                           m.Int32Constant(msk)));
+      Stream s = m.Build();
+      ASSERT_EQ(1U, s.size());
+      EXPECT_EQ(kMipsExt, s[0]->arch_opcode());
+      ASSERT_EQ(3U, s[0]->InputCount());
+      EXPECT_EQ(lsb, s.ToInt32(s[0]->InputAt(1)));
+      int32_t actual_width = (lsb + width > 32) ? (32 - lsb) : width;
+      EXPECT_EQ(actual_width, s.ToInt32(s[0]->InputAt(2)));
+    }
+  }
+  TRACED_FORRANGE(int32_t, shift, -32, 63) {
+    int32_t lsb = shift & 0x1f;
+    TRACED_FORRANGE(int32_t, width, 1, 31) {
+      uint32_t msk = (1 << width) - 1;
+      StreamBuilder m(this, kMachInt32, kMachInt32);
+      m.Return(
+          m.Word32And(m.Int32Constant(msk),
+                      m.Word32Shr(m.Parameter(0), m.Int32Constant(shift))));
+      Stream s = m.Build();
+      ASSERT_EQ(1U, s.size());
+      EXPECT_EQ(kMipsExt, s[0]->arch_opcode());
+      ASSERT_EQ(3U, s[0]->InputCount());
+      EXPECT_EQ(lsb, s.ToInt32(s[0]->InputAt(1)));
+      int32_t actual_width = (lsb + width > 32) ? (32 - lsb) : width;
+      EXPECT_EQ(actual_width, s.ToInt32(s[0]->InputAt(2)));
+    }
+  }
+}
+
+
+TEST_F(InstructionSelectorTest, Word32AndToClearBits) {
+  TRACED_FORRANGE(int32_t, shift, 1, 31) {
+    int32_t mask = ~((1 << shift) - 1);
+    StreamBuilder m(this, kMachInt32, kMachInt32);
+    m.Return(m.Word32And(m.Parameter(0), m.Int32Constant(mask)));
+    Stream s = m.Build();
+    ASSERT_EQ(1U, s.size());
+    EXPECT_EQ(kMipsIns, s[0]->arch_opcode());
+    ASSERT_EQ(3U, s[0]->InputCount());
+    EXPECT_EQ(0, s.ToInt32(s[0]->InputAt(1)));
+    EXPECT_EQ(shift, s.ToInt32(s[0]->InputAt(2)));
+  }
+  TRACED_FORRANGE(int32_t, shift, 1, 31) {
+    int32_t mask = ~((1 << shift) - 1);
+    StreamBuilder m(this, kMachInt32, kMachInt32);
+    m.Return(m.Word32And(m.Int32Constant(mask), m.Parameter(0)));
+    Stream s = m.Build();
+    ASSERT_EQ(1U, s.size());
+    EXPECT_EQ(kMipsIns, s[0]->arch_opcode());
+    ASSERT_EQ(3U, s[0]->InputCount());
+    EXPECT_EQ(0, s.ToInt32(s[0]->InputAt(1)));
+    EXPECT_EQ(shift, s.ToInt32(s[0]->InputAt(2)));
+  }
+}
 
 
 // ----------------------------------------------------------------------------
@@ -478,6 +662,28 @@ INSTANTIATE_TEST_CASE_P(InstructionSelectorTest,
                         ::testing::ValuesIn(kConversionInstructions));
 
 
+typedef InstructionSelectorTestWithParam<Conversion>
+    CombineChangeFloat64ToInt32WithRoundFloat64;
+
+TEST_P(CombineChangeFloat64ToInt32WithRoundFloat64, Parameter) {
+  {
+    const Conversion conv = GetParam();
+    StreamBuilder m(this, conv.mi.machine_type, conv.src_machine_type);
+    m.Return(m.ChangeFloat64ToInt32((m.*conv.mi.constructor)(m.Parameter(0))));
+    Stream s = m.Build();
+    ASSERT_EQ(1U, s.size());
+    EXPECT_EQ(conv.mi.arch_opcode, s[0]->arch_opcode());
+    EXPECT_EQ(kMode_None, s[0]->addressing_mode());
+    ASSERT_EQ(1U, s[0]->InputCount());
+    EXPECT_EQ(1U, s[0]->OutputCount());
+  }
+}
+
+INSTANTIATE_TEST_CASE_P(InstructionSelectorTest,
+                        CombineChangeFloat64ToInt32WithRoundFloat64,
+                        ::testing::ValuesIn(kFloat64RoundInstructions));
+
+
 // ----------------------------------------------------------------------------
 // Loads and stores.
 // ----------------------------------------------------------------------------
@@ -497,8 +703,8 @@ static const MemoryAccess kMemoryAccesses[] = {
     {kMachInt16, kMipsLh, kMipsSh},
     {kMachUint16, kMipsLhu, kMipsSh},
     {kMachInt32, kMipsLw, kMipsSw},
-    {kRepFloat32, kMipsLwc1, kMipsSwc1},
-    {kRepFloat64, kMipsLdc1, kMipsSdc1}};
+    {kMachFloat32, kMipsLwc1, kMipsSwc1},
+    {kMachFloat64, kMipsLdc1, kMipsSdc1}};
 
 
 struct MemoryAccessImm {
@@ -646,7 +852,7 @@ TEST_P(InstructionSelectorMemoryAccessTest, LoadWithParameters) {
 TEST_P(InstructionSelectorMemoryAccessTest, StoreWithParameters) {
   const MemoryAccess memacc = GetParam();
   StreamBuilder m(this, kMachInt32, kMachPtr, kMachInt32, memacc.type);
-  m.Store(memacc.type, m.Parameter(0), m.Parameter(1));
+  m.Store(memacc.type, m.Parameter(0), m.Parameter(1), kNoWriteBarrier);
   m.Return(m.Int32Constant(0));
   Stream s = m.Build();
   ASSERT_EQ(1U, s.size());
@@ -696,8 +902,8 @@ TEST_P(InstructionSelectorMemoryAccessImmTest, StoreWithImmediateIndex) {
   const MemoryAccessImm memacc = GetParam();
   TRACED_FOREACH(int32_t, index, memacc.immediates) {
     StreamBuilder m(this, kMachInt32, kMachPtr, memacc.type);
-    m.Store(memacc.type, m.Parameter(0), m.Int32Constant(index),
-            m.Parameter(1));
+    m.Store(memacc.type, m.Parameter(0), m.Int32Constant(index), m.Parameter(1),
+            kNoWriteBarrier);
     m.Return(m.Int32Constant(0));
     Stream s = m.Build();
     ASSERT_EQ(1U, s.size());
@@ -748,8 +954,8 @@ TEST_P(InstructionSelectorMemoryAccessImmMoreThan16bitTest,
   const MemoryAccessImm1 memacc = GetParam();
   TRACED_FOREACH(int32_t, index, memacc.immediates) {
     StreamBuilder m(this, kMachInt32, kMachPtr, memacc.type);
-    m.Store(memacc.type, m.Parameter(0), m.Int32Constant(index),
-            m.Parameter(1));
+    m.Store(memacc.type, m.Parameter(0), m.Int32Constant(index), m.Parameter(1),
+            kNoWriteBarrier);
     m.Return(m.Int32Constant(0));
     Stream s = m.Build();
     ASSERT_EQ(2U, s.size());
@@ -844,6 +1050,71 @@ TEST_F(InstructionSelectorTest, Float64Abs) {
   ASSERT_EQ(1U, s[0]->OutputCount());
   EXPECT_EQ(s.ToVreg(n), s.ToVreg(s[0]->Output()));
 }
+
+
+TEST_F(InstructionSelectorTest, Float32Max) {
+  StreamBuilder m(this, kMachFloat32, kMachFloat32, kMachFloat32);
+  Node* const p0 = m.Parameter(0);
+  Node* const p1 = m.Parameter(1);
+  Node* const n = m.Float32Max(p0, p1);
+  m.Return(n);
+  Stream s = m.Build();
+  // Float32Max is `(b < a) ? a : b`.
+  ASSERT_EQ(1U, s.size());
+  EXPECT_EQ(kMipsFloat32Max, s[0]->arch_opcode());
+  ASSERT_EQ(2U, s[0]->InputCount());
+  ASSERT_EQ(1U, s[0]->OutputCount());
+  EXPECT_EQ(s.ToVreg(n), s.ToVreg(s[0]->Output()));
+}
+
+
+TEST_F(InstructionSelectorTest, Float32Min) {
+  StreamBuilder m(this, kMachFloat32, kMachFloat32, kMachFloat32);
+  Node* const p0 = m.Parameter(0);
+  Node* const p1 = m.Parameter(1);
+  Node* const n = m.Float32Min(p0, p1);
+  m.Return(n);
+  Stream s = m.Build();
+  // Float32Min is `(a < b) ? a : b`.
+  ASSERT_EQ(1U, s.size());
+  EXPECT_EQ(kMipsFloat32Min, s[0]->arch_opcode());
+  ASSERT_EQ(2U, s[0]->InputCount());
+  ASSERT_EQ(1U, s[0]->OutputCount());
+  EXPECT_EQ(s.ToVreg(n), s.ToVreg(s[0]->Output()));
+}
+
+
+TEST_F(InstructionSelectorTest, Float64Max) {
+  StreamBuilder m(this, kMachFloat64, kMachFloat64, kMachFloat64);
+  Node* const p0 = m.Parameter(0);
+  Node* const p1 = m.Parameter(1);
+  Node* const n = m.Float64Max(p0, p1);
+  m.Return(n);
+  Stream s = m.Build();
+  // Float64Max is `(b < a) ? a : b`.
+  ASSERT_EQ(1U, s.size());
+  EXPECT_EQ(kMipsFloat64Max, s[0]->arch_opcode());
+  ASSERT_EQ(2U, s[0]->InputCount());
+  ASSERT_EQ(1U, s[0]->OutputCount());
+  EXPECT_EQ(s.ToVreg(n), s.ToVreg(s[0]->Output()));
+}
+
+
+TEST_F(InstructionSelectorTest, Float64Min) {
+  StreamBuilder m(this, kMachFloat64, kMachFloat64, kMachFloat64);
+  Node* const p0 = m.Parameter(0);
+  Node* const p1 = m.Parameter(1);
+  Node* const n = m.Float64Min(p0, p1);
+  m.Return(n);
+  Stream s = m.Build();
+  // Float64Min is `(a < b) ? a : b`.
+  ASSERT_EQ(1U, s.size());
+  EXPECT_EQ(kMipsFloat64Min, s[0]->arch_opcode());
+  ASSERT_EQ(2U, s[0]->InputCount());
+  ASSERT_EQ(1U, s[0]->OutputCount());
+  EXPECT_EQ(s.ToVreg(n), s.ToVreg(s[0]->Output()));
+}
+
 
 }  // namespace compiler
 }  // namespace internal

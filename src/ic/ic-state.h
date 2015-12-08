@@ -23,30 +23,29 @@ class ICUtility : public AllStatic {
 
 class CallICState final BASE_EMBEDDED {
  public:
-  explicit CallICState(ExtraICState extra_ic_state);
+  explicit CallICState(ExtraICState extra_ic_state)
+      : bit_field_(extra_ic_state) {}
+  CallICState(int argc, ConvertReceiverMode convert_mode)
+      : bit_field_(ArgcBits::encode(argc) |
+                   ConvertModeBits::encode(convert_mode)) {}
 
-  enum CallType { METHOD, FUNCTION };
-
-  CallICState(int argc, CallType call_type)
-      : argc_(argc), call_type_(call_type) {}
-
-  ExtraICState GetExtraICState() const;
+  ExtraICState GetExtraICState() const { return bit_field_; }
 
   static void GenerateAheadOfTime(Isolate*,
                                   void (*Generate)(Isolate*,
                                                    const CallICState&));
 
-  int arg_count() const { return argc_; }
-  CallType call_type() const { return call_type_; }
-
-  bool CallAsMethod() const { return call_type_ == METHOD; }
+  int argc() const { return ArgcBits::decode(bit_field_); }
+  ConvertReceiverMode convert_mode() const {
+    return ConvertModeBits::decode(bit_field_);
+  }
 
  private:
-  class ArgcBits : public BitField<int, 0, Code::kArgumentsBits> {};
-  class CallTypeBits : public BitField<CallType, Code::kArgumentsBits, 1> {};
+  typedef BitField<int, 0, Code::kArgumentsBits> ArgcBits;
+  typedef BitField<ConvertReceiverMode, Code::kArgumentsBits, 2>
+      ConvertModeBits;
 
-  const int argc_;
-  const CallType call_type_;
+  int const bit_field_;
 };
 
 
@@ -121,9 +120,9 @@ class BinaryOpICState final BASE_EMBEDDED {
   Token::Value op() const { return op_; }
   Maybe<int> fixed_right_arg() const { return fixed_right_arg_; }
 
-  Type* GetLeftType(Zone* zone) const { return KindToType(left_kind_, zone); }
-  Type* GetRightType(Zone* zone) const { return KindToType(right_kind_, zone); }
-  Type* GetResultType(Zone* zone) const;
+  Type* GetLeftType() const { return KindToType(left_kind_); }
+  Type* GetRightType() const { return KindToType(right_kind_); }
+  Type* GetResultType() const;
 
   void Update(Handle<Object> left, Handle<Object> right, Handle<Object> result);
 
@@ -137,7 +136,7 @@ class BinaryOpICState final BASE_EMBEDDED {
   Kind UpdateKind(Handle<Object> object, Kind kind) const;
 
   static const char* KindToString(Kind kind);
-  static Type* KindToType(Kind kind, Zone* zone);
+  static Type* KindToType(Kind kind);
   static bool KindMaybeSmi(Kind kind) {
     return (kind >= SMI && kind <= NUMBER) || kind == GENERIC;
   }
@@ -174,16 +173,18 @@ class CompareICState {
   //   ... < GENERIC
   //   SMI < NUMBER
   //   INTERNALIZED_STRING < STRING
-  //   KNOWN_OBJECT < OBJECT
+  //   INTERNALIZED_STRING < UNIQUE_NAME
+  //   KNOWN_RECEIVER < RECEIVER
   enum State {
     UNINITIALIZED,
+    BOOLEAN,
     SMI,
     NUMBER,
     STRING,
     INTERNALIZED_STRING,
-    UNIQUE_NAME,   // Symbol or InternalizedString
-    OBJECT,        // JSObject
-    KNOWN_OBJECT,  // JSObject with specific map (faster check)
+    UNIQUE_NAME,     // Symbol or InternalizedString
+    RECEIVER,        // JSReceiver
+    KNOWN_RECEIVER,  // JSReceiver with specific map (faster check)
     GENERIC
   };
 
@@ -202,10 +203,10 @@ class CompareICState {
 
 class LoadICState final BASE_EMBEDDED {
  private:
-  class ContextualModeBits : public BitField<ContextualMode, 0, 1> {};
+  class TypeofModeBits : public BitField<TypeofMode, 0, 1> {};
   class LanguageModeBits
-      : public BitField<LanguageMode, ContextualModeBits::kNext, 2> {};
-  STATIC_ASSERT(static_cast<int>(NOT_CONTEXTUAL) == 0);
+      : public BitField<LanguageMode, TypeofModeBits::kNext, 2> {};
+  STATIC_ASSERT(static_cast<int>(INSIDE_TYPEOF) == 0);
   const ExtraICState state_;
 
  public:
@@ -216,22 +217,20 @@ class LoadICState final BASE_EMBEDDED {
 
   explicit LoadICState(ExtraICState extra_ic_state) : state_(extra_ic_state) {}
 
-  explicit LoadICState(ContextualMode mode, LanguageMode language_mode)
-      : state_(ContextualModeBits::encode(mode) |
+  explicit LoadICState(TypeofMode typeof_mode, LanguageMode language_mode)
+      : state_(TypeofModeBits::encode(typeof_mode) |
                LanguageModeBits::encode(language_mode)) {}
 
   ExtraICState GetExtraICState() const { return state_; }
 
-  ContextualMode contextual_mode() const {
-    return ContextualModeBits::decode(state_);
-  }
+  TypeofMode typeof_mode() const { return TypeofModeBits::decode(state_); }
 
   LanguageMode language_mode() const {
     return LanguageModeBits::decode(state_);
   }
 
-  static ContextualMode GetContextualMode(ExtraICState state) {
-    return LoadICState(state).contextual_mode();
+  static TypeofMode GetTypeofMode(ExtraICState state) {
+    return LoadICState(state).typeof_mode();
   }
 
   static LanguageMode GetLanguageMode(ExtraICState state) {
@@ -268,7 +267,8 @@ class StoreICState final BASE_EMBEDDED {
  private:
   const ExtraICState state_;
 };
-}
-}
+
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_IC_STATE_H_

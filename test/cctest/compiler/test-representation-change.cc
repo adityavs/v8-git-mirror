@@ -2,9 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// TODO(jochen): Remove this after the setting is turned on globally.
+#define V8_IMMINENT_DEPRECATION_WARNINGS
+
 #include <limits>
 
-#include "src/v8.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/codegen-tester.h"
 #include "test/cctest/compiler/graph-builder-tester.h"
@@ -13,10 +15,7 @@
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/representation-change.h"
 
-using namespace v8::internal;
-using namespace v8::internal::compiler;
-
-namespace v8 {  // for friendiness.
+namespace v8 {
 namespace internal {
 namespace compiler {
 
@@ -27,8 +26,8 @@ class RepresentationChangerTester : public HandleAndZoneScope,
       : GraphAndBuilders(main_zone()),
         javascript_(main_zone()),
         jsgraph_(main_isolate(), main_graph_, &main_common_, &javascript_,
-                 &main_machine_),
-        changer_(&jsgraph_, &main_simplified_, main_isolate()) {
+                 &main_simplified_, &main_machine_),
+        changer_(&jsgraph_, main_isolate()) {
     Node* s = graph()->NewNode(common()->Start(num_parameters));
     graph()->SetStart(s);
   }
@@ -71,7 +70,7 @@ class RepresentationChangerTester : public HandleAndZoneScope,
   void CheckHeapConstant(Node* n, HeapObject* expected) {
     HeapObjectMatcher m(n);
     CHECK(m.HasValue());
-    CHECK_EQ(expected, *m.Value().handle());
+    CHECK_EQ(expected, *m.Value());
   }
 
   void CheckNumberConstant(Node* n, double expected) {
@@ -82,7 +81,9 @@ class RepresentationChangerTester : public HandleAndZoneScope,
   }
 
   Node* Parameter(int index = 0) {
-    return graph()->NewNode(common()->Parameter(index), graph()->start());
+    Node* n = graph()->NewNode(common()->Parameter(index), graph()->start());
+    NodeProperties::SetType(n, Type::Any());
+    return n;
   }
 
   void CheckTypeError(MachineTypeUnion from, MachineTypeUnion to) {
@@ -100,9 +101,6 @@ class RepresentationChangerTester : public HandleAndZoneScope,
     CHECK_EQ(n, c);
   }
 };
-}  // namespace compiler
-}  // namespace internal
-}  // namespace v8
 
 
 static const MachineType all_reps[] = {kRepBit,     kRepWord32,  kRepWord64,
@@ -454,18 +452,19 @@ TEST(SingleChanges) {
 TEST(SignednessInWord32) {
   RepresentationChangerTester r;
 
-  // TODO(titzer): assume that uses of a word32 without a sign mean kTypeInt32.
-  CheckChange(IrOpcode::kChangeTaggedToInt32, kRepTagged,
-              kRepWord32 | kTypeInt32);
-  CheckChange(IrOpcode::kChangeTaggedToUint32, kRepTagged,
-              kRepWord32 | kTypeUint32);
+  CheckChange(IrOpcode::kChangeTaggedToInt32, kRepTagged | kTypeInt32,
+              kRepWord32);
+  CheckChange(IrOpcode::kChangeTaggedToUint32, kRepTagged | kTypeUint32,
+              kRepWord32);
   CheckChange(IrOpcode::kChangeInt32ToFloat64, kRepWord32, kRepFloat64);
-  CheckChange(IrOpcode::kChangeFloat64ToInt32, kRepFloat64, kRepWord32);
+  CheckChange(IrOpcode::kChangeFloat64ToInt32, kRepFloat64 | kTypeInt32,
+              kRepWord32);
+  CheckChange(IrOpcode::kTruncateFloat64ToInt32, kRepFloat64, kRepWord32);
 
   CheckTwoChanges(IrOpcode::kChangeInt32ToFloat64,
                   IrOpcode::kTruncateFloat64ToFloat32, kRepWord32, kRepFloat32);
   CheckTwoChanges(IrOpcode::kChangeFloat32ToFloat64,
-                  IrOpcode::kChangeFloat64ToInt32, kRepFloat32, kRepWord32);
+                  IrOpcode::kTruncateFloat64ToInt32, kRepFloat32, kRepWord32);
 }
 
 
@@ -480,7 +479,6 @@ TEST(Nops) {
   // 32-bit floats.
   r.CheckNop(kRepFloat32, kRepFloat32);
   r.CheckNop(kRepFloat32 | kTypeNumber, kRepFloat32);
-  r.CheckNop(kRepFloat32, kRepFloat32 | kTypeNumber);
 
   // 32-bit words can be used as smaller word sizes and vice versa, because
   // loads from memory implicitly sign or zero extend the value to the
@@ -508,39 +506,29 @@ TEST(TypeErrors) {
 
   // Wordish cannot be implicitly converted to/from comparison conditions.
   r.CheckTypeError(kRepWord8, kRepBit);
-  r.CheckTypeError(kRepWord8, kRepBit | kTypeBool);
   r.CheckTypeError(kRepWord16, kRepBit);
-  r.CheckTypeError(kRepWord16, kRepBit | kTypeBool);
   r.CheckTypeError(kRepWord32, kRepBit);
-  r.CheckTypeError(kRepWord32, kRepBit | kTypeBool);
   r.CheckTypeError(kRepWord64, kRepBit);
-  r.CheckTypeError(kRepWord64, kRepBit | kTypeBool);
 
   // Floats cannot be implicitly converted to/from comparison conditions.
   r.CheckTypeError(kRepFloat64, kRepBit);
-  r.CheckTypeError(kRepFloat64, kRepBit | kTypeBool);
   r.CheckTypeError(kRepBit, kRepFloat64);
   r.CheckTypeError(kRepBit | kTypeBool, kRepFloat64);
 
   // Floats cannot be implicitly converted to/from comparison conditions.
   r.CheckTypeError(kRepFloat32, kRepBit);
-  r.CheckTypeError(kRepFloat32, kRepBit | kTypeBool);
   r.CheckTypeError(kRepBit, kRepFloat32);
   r.CheckTypeError(kRepBit | kTypeBool, kRepFloat32);
 
   // Word64 is internal and shouldn't be implicitly converted.
-  r.CheckTypeError(kRepWord64, kRepTagged | kTypeBool);
   r.CheckTypeError(kRepWord64, kRepTagged);
-  r.CheckTypeError(kRepWord64, kRepTagged | kTypeBool);
   r.CheckTypeError(kRepTagged, kRepWord64);
   r.CheckTypeError(kRepTagged | kTypeBool, kRepWord64);
 
   // Word64 / Word32 shouldn't be implicitly converted.
   r.CheckTypeError(kRepWord64, kRepWord32);
   r.CheckTypeError(kRepWord32, kRepWord64);
-  r.CheckTypeError(kRepWord64, kRepWord32 | kTypeInt32);
   r.CheckTypeError(kRepWord32 | kTypeInt32, kRepWord64);
-  r.CheckTypeError(kRepWord64, kRepWord32 | kTypeUint32);
   r.CheckTypeError(kRepWord32 | kTypeUint32, kRepWord64);
 
   for (size_t i = 0; i < arraysize(all_reps); i++) {
@@ -551,3 +539,7 @@ TEST(TypeErrors) {
     }
   }
 }
+
+}  // namespace compiler
+}  // namespace internal
+}  // namespace v8

@@ -29,7 +29,6 @@
 
 // Make sure we don't rely on functions patchable by monkeys.
 var call = Function.prototype.call.call.bind(Function.prototype.call)
-var observe = Object.observe;
 var getOwnPropertyNames = Object.getOwnPropertyNames;
 var defineProperty = Object.defineProperty;
 var numberPrototype = Number.prototype;
@@ -63,7 +62,15 @@ function clearProp(o, name) {
 
 // Find intrinsics and null them out.
 var globals = Object.getOwnPropertyNames(this)
-var whitelist = {Promise: true, TypeError: true}
+var whitelist = {
+  Promise: true,
+  TypeError: true,
+  String: true,
+  JSON: true,
+  Error: true,
+  MjsUnitAssertionError: true
+};
+
 for (var i in globals) {
   var name = globals[i]
   if (name in whitelist || name[0] === name[0].toLowerCase()) delete globals[i]
@@ -86,22 +93,34 @@ function assertAsync(b, s) {
   --asyncAssertsExpected
 }
 
-function assertAsyncDone(iteration) {
-  var iteration = iteration || 0
-  var dummy = {}
-  observe(dummy,
-    function() {
-      if (asyncAssertsExpected === 0)
-        assertAsync(true, "all")
-      else if (iteration > 10)  // Shouldn't take more.
-        assertAsync(false, "all")
-      else
-        assertAsyncDone(iteration + 1)
+function assertLater(f, name) {
+  assertFalse(f()); // should not be true synchronously
+  ++asyncAssertsExpected;
+  var iterations = 0;
+  function runAssertion() {
+    if (f()) {
+      print(name, "succeeded");
+      --asyncAssertsExpected;
+    } else if (iterations++ < 10) {
+      %EnqueueMicrotask(runAssertion);
+    } else {
+      %AbortJS(name + " FAILED!");
     }
-  )
-  dummy.dummy = dummy
+  }
+  %EnqueueMicrotask(runAssertion);
 }
 
+function assertAsyncDone(iteration) {
+  var iteration = iteration || 0;
+  %EnqueueMicrotask(function() {
+    if (asyncAssertsExpected === 0)
+      assertAsync(true, "all")
+    else if (iteration > 10)  // Shouldn't take more.
+      assertAsync(false, "all... " + asyncAssertsExpected)
+    else
+      assertAsyncDone(iteration + 1)
+  });
+}
 
 (function() {
   assertThrows(function() { Promise(function() {}) }, TypeError)
@@ -214,6 +233,7 @@ function assertAsyncDone(iteration) {
   assertAsyncRan()
 })();
 
+/* TODO(caitp): remove tests once PromiseChain is removed, per bug 3237
 (function() {
   var p1 = Promise.accept(5)
   var p2 = Promise.accept(p1)
@@ -223,7 +243,7 @@ function assertAsyncDone(iteration) {
     assertUnreachable
   )
   assertAsyncRan()
-})();
+})();*/
 
 (function() {
   var p1 = Promise.accept(5)
@@ -518,6 +538,7 @@ function assertAsyncDone(iteration) {
   assertAsyncRan()
 })();
 
+/* TODO(caitp): remove tests once PromiseChain is removed, per bug v8:3237
 (function() {
   var p1 = Promise.accept(5)
   var p2 = Promise.accept(p1)
@@ -529,7 +550,7 @@ function assertAsyncDone(iteration) {
   )
   deferred.resolve(p2)
   assertAsyncRan()
-})();
+})(); */
 
 (function() {
   var p1 = Promise.accept(5)
@@ -570,6 +591,7 @@ function assertAsyncDone(iteration) {
   assertAsyncRan()
 })();
 
+/* TODO(caitp): remove tests once PromiseChain is removed, per bug v8:3237
 (function() {
   var p1 = Promise.accept(5)
   var p2 = {then: function(onResolve, onReject) { onResolve(p1) }}
@@ -581,7 +603,7 @@ function assertAsyncDone(iteration) {
   )
   deferred.resolve(p2)
   assertAsyncRan()
-})();
+})(); */
 
 (function() {
   var p1 = Promise.accept(5)
@@ -616,6 +638,7 @@ function assertAsyncDone(iteration) {
   assertAsyncRan()
 })();
 
+/* TODO(caitp): remove tests once PromiseChain is removed, per bug v8:3237
 (function() {
   var deferred = Promise.defer()
   var p = deferred.promise
@@ -625,8 +648,9 @@ function assertAsyncDone(iteration) {
     assertUnreachable
   )
   assertAsyncRan()
-})();
+})();*/
 
+/* TODO(caitp): remove tests once PromiseChain is removed, per bug v8:3237
 (function() {
   var deferred = Promise.defer()
   var p = deferred.promise
@@ -636,7 +660,7 @@ function assertAsyncDone(iteration) {
     function(r) { assertAsync(r instanceof TypeError, "cyclic/deferred/then") }
   )
   assertAsyncRan()
-})();
+})();*/
 
 (function() {
   Promise.all([]).chain(
@@ -1009,9 +1033,9 @@ function assertAsyncDone(iteration) {
   log = ""
   var p4 = MyPromise.resolve(4)
   var p5 = MyPromise.reject(5)
-  assertTrue(p4 instanceof Promise, "subclass/instance4")
+  assertTrue(p4 instanceof MyPromise, "subclass/instance4")
   assertTrue(p4 instanceof MyPromise, "subclass/instance-my4")
-  assertTrue(p5 instanceof Promise, "subclass/instance5")
+  assertTrue(p5 instanceof MyPromise, "subclass/instance5")
   assertTrue(p5 instanceof MyPromise, "subclass/instance-my5")
   d3.resolve(3)
   assertTrue(log === "nx4nr5x3", "subclass/resolve")
@@ -1026,12 +1050,70 @@ function assertAsyncDone(iteration) {
 
   log = ""
   Promise.all([11, Promise.accept(12), 13, MyPromise.accept(14), 15, 16])
-  assertTrue(log === "nx14n", "subclass/all/arg")
+
+  assertTrue(log === "nx14", "subclass/all/arg")
 
   log = ""
   MyPromise.all([21, Promise.accept(22), 23, MyPromise.accept(24), 25, 26])
-  assertTrue(log === "nx24nnx21nnx23nnnx25nnx26n", "subclass/all/self")
+  assertTrue(log === "nx24nnx21nnnnx23nnnx25nnx26n", "subclass/all/self")
 })();
 
+(function() {
+  'use strict';
+
+  class Pact extends Promise { }
+  class Vow  extends Pact    { }
+  class Oath extends Vow     { }
+
+  Oath.constructor = Vow;
+
+  assertTrue(Pact.resolve(Pact.resolve()).constructor === Pact,
+             "subclass/resolve/own");
+
+  assertTrue(Pact.resolve(Promise.resolve()).constructor === Pact,
+             "subclass/resolve/ancestor");
+
+  assertTrue(Pact.resolve(Vow.resolve()).constructor === Pact,
+             "subclass/resolve/descendant"); var vow = Vow.resolve();
+
+  vow.constructor = Oath;
+  assertTrue(Oath.resolve(vow) === vow,
+             "subclass/resolve/descendant with transplanted own constructor");
+}());
+
+(function() {
+  var thenCalled = false;
+
+  var resolve;
+  var promise = new Promise(function(res) { resolve = res; });
+  resolve({ then() { thenCalled = true; throw new Error(); } });
+  assertLater(function() { return thenCalled; }, "resolve-with-thenable");
+});
+
+(function() {
+  var calledWith;
+
+  var resolve;
+  var p1 = (new Promise(function(res) { resolve = res; }));
+  var p2 = p1.then(function(v) {
+    return {
+      then(resolve, reject) { resolve({ then() { calledWith = v }}); }
+    };
+  });
+
+  resolve({ then(resolve) { resolve(2); } });
+  assertLater(function() { return calledWith === 2; },
+              "resolve-with-thenable2");
+})();
+
+(function() {
+  var p = Promise.resolve();
+  var callCount = 0;
+  defineProperty(p, "constructor", {
+    get: function() { ++callCount; return Promise; }
+  });
+  p.then();
+  assertEquals(1, callCount);
+})();
 
 assertAsyncDone()

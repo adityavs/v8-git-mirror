@@ -28,8 +28,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "src/v8.h"
-
 #if V8_TARGET_ARCH_MIPS64
 
 #include "src/base/platform/platform.h"
@@ -69,6 +67,7 @@ class Decoder {
   // Printing of common values.
   void PrintRegister(int reg);
   void PrintFPURegister(int freg);
+  void PrintFPUStatusRegister(int freg);
   void PrintRs(Instruction* instr);
   void PrintRt(Instruction* instr);
   void PrintRd(Instruction* instr);
@@ -189,6 +188,17 @@ void Decoder::PrintRd(Instruction* instr) {
 // Print the FPUregister name according to the active name converter.
 void Decoder::PrintFPURegister(int freg) {
   Print(converter_.NameOfXMMRegister(freg));
+}
+
+
+void Decoder::PrintFPUStatusRegister(int freg) {
+  switch (freg) {
+    case kFCSRRegister:
+      Print("FCSR");
+      break;
+    default:
+      Print(converter_.NameOfXMMRegister(freg));
+  }
 }
 
 
@@ -344,8 +354,10 @@ void Decoder::PrintPCImm21(Instruction* instr, int delta_pc, int n_bits) {
 
 // Print 26-bit hex immediate value.
 void Decoder::PrintXImm26(Instruction* instr) {
-  uint32_t imm = static_cast<uint32_t>(instr->Imm26Value()) << kImmFieldShift;
-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
+  uint64_t target = static_cast<uint64_t>(instr->Imm26Value())
+                    << kImmFieldShift;
+  target = (reinterpret_cast<uint64_t>(instr) & ~0xfffffff) | target;
+  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%lx", target);
 }
 
 
@@ -481,22 +493,42 @@ int Decoder::FormatRegister(Instruction* instr, const char* format) {
 // complexity of FormatOption.
 int Decoder::FormatFPURegister(Instruction* instr, const char* format) {
   DCHECK(format[0] == 'f');
-  if (format[1] == 's') {  // 'fs: fs register.
-    int reg = instr->FsValue();
-    PrintFPURegister(reg);
-    return 2;
-  } else if (format[1] == 't') {  // 'ft: ft register.
-    int reg = instr->FtValue();
-    PrintFPURegister(reg);
-    return 2;
-  } else if (format[1] == 'd') {  // 'fd: fd register.
-    int reg = instr->FdValue();
-    PrintFPURegister(reg);
-    return 2;
-  } else if (format[1] == 'r') {  // 'fr: fr register.
-    int reg = instr->FrValue();
-    PrintFPURegister(reg);
-    return 2;
+  if ((CTC1 == instr->RsFieldRaw()) || (CFC1 == instr->RsFieldRaw())) {
+    if (format[1] == 's') {  // 'fs: fs register.
+      int reg = instr->FsValue();
+      PrintFPUStatusRegister(reg);
+      return 2;
+    } else if (format[1] == 't') {  // 'ft: ft register.
+      int reg = instr->FtValue();
+      PrintFPUStatusRegister(reg);
+      return 2;
+    } else if (format[1] == 'd') {  // 'fd: fd register.
+      int reg = instr->FdValue();
+      PrintFPUStatusRegister(reg);
+      return 2;
+    } else if (format[1] == 'r') {  // 'fr: fr register.
+      int reg = instr->FrValue();
+      PrintFPUStatusRegister(reg);
+      return 2;
+    }
+  } else {
+    if (format[1] == 's') {  // 'fs: fs register.
+      int reg = instr->FsValue();
+      PrintFPURegister(reg);
+      return 2;
+    } else if (format[1] == 't') {  // 'ft: ft register.
+      int reg = instr->FtValue();
+      PrintFPURegister(reg);
+      return 2;
+    } else if (format[1] == 'd') {  // 'fd: fd register.
+      int reg = instr->FdValue();
+      PrintFPURegister(reg);
+      return 2;
+    } else if (format[1] == 'r') {  // 'fr: fr register.
+      int reg = instr->FrValue();
+      PrintFPURegister(reg);
+      return 2;
+    }
   }
   UNREACHABLE();
   return -1;
@@ -1073,7 +1105,7 @@ void Decoder::DecodeTypeRegisterSPECIAL(Instruction* instr) {
       Format(instr, "jr      'rs");
       break;
     case JALR:
-      Format(instr, "jalr    'rs");
+      Format(instr, "jalr    'rs, 'rd");
       break;
     case SLL:
       if (0x0 == static_cast<int>(instr->InstructionBits()))
@@ -1179,7 +1211,16 @@ void Decoder::DecodeTypeRegisterSPECIAL(Instruction* instr) {
       }
       break;
     case MFLO:
-      Format(instr, "mflo    'rd");
+      if (instr->Bits(25, 16) == 0) {
+        Format(instr, "mflo    'rd");
+      } else {
+        if ((instr->FunctionFieldRaw() == DCLZ_R6) && (instr->FdValue() == 1)) {
+          Format(instr, "dclz    'rd, 'rs");
+        } else if ((instr->FunctionFieldRaw() == DCLO_R6) &&
+                   (instr->FdValue() == 1)) {
+          Format(instr, "dclo     'rd, 'rs");
+        }
+      }
       break;
     case D_MUL_MUH_U:  // Equals to DMULTU.
       if (kArchVariant != kMips64r6) {
@@ -1360,6 +1401,11 @@ void Decoder::DecodeTypeRegisterSPECIAL2(Instruction* instr) {
         Format(instr, "clz     'rd, 'rs");
       }
       break;
+    case DCLZ:
+      if (kArchVariant != kMips64r6) {
+        Format(instr, "dclz    'rd, 'rs");
+      }
+      break;
     default:
       UNREACHABLE();
   }
@@ -1510,17 +1556,21 @@ void Decoder::DecodeTypeImmediateREGIMM(Instruction* instr) {
     case BGEZ:
       Format(instr, "bgez    'rs, 'imm16u -> 'imm16p4s2");
       break;
-    case BGEZAL:
-      Format(instr, "bgezal  'rs, 'imm16u -> 'imm16p4s2");
+    case BGEZAL: {
+      if (instr->RsValue() == 0)
+        Format(instr, "bal     'imm16s -> 'imm16p4s2");
+      else
+        Format(instr, "bgezal  'rs, 'imm16u -> 'imm16p4s2");
       break;
+    }
     case BGEZALL:
       Format(instr, "bgezall 'rs, 'imm16u -> 'imm16p4s2");
       break;
     case DAHI:
-      Format(instr, "dahi    'rs, 'imm16u");
+      Format(instr, "dahi    'rs, 'imm16x");
       break;
     case DATI:
-      Format(instr, "dati    'rs, 'imm16u");
+      Format(instr, "dati    'rs, 'imm16x");
       break;
     default:
       UNREACHABLE();
@@ -1673,14 +1723,14 @@ void Decoder::DecodeTypeImmediate(Instruction* instr) {
         Format(instr, "lui     'rt, 'imm16x");
       } else {
         if (instr->RsValue() != 0) {
-          Format(instr, "aui     'rt, 'imm16x");
+          Format(instr, "aui     'rt, 'rs, 'imm16x");
         } else {
           Format(instr, "lui     'rt, 'imm16x");
         }
       }
       break;
     case DAUI:
-      Format(instr, "daui    'rt, 'imm16x");
+      Format(instr, "daui    'rt, 'rs, 'imm16x");
       break;
     // ------------- Memory instructions.
     case LB:
@@ -1824,7 +1874,7 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
   out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
                               "%08x       ",
                               instr->InstructionBits());
-  switch (instr->InstructionType()) {
+  switch (instr->InstructionType(Instruction::TypeChecks::EXTRA)) {
     case Instruction::kRegisterType: {
       return DecodeTypeRegister(instr);
     }

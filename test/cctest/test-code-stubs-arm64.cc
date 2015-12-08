@@ -25,6 +25,9 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+// TODO(jochen): Remove this after the setting is turned on globally.
+#define V8_IMMINENT_DEPRECATION_WARNINGS
+
 #include <stdlib.h>
 
 #include "src/v8.h"
@@ -51,7 +54,8 @@ ConvertDToIFunc MakeConvertDToIFuncTrampoline(Isolate* isolate,
       v8::base::OS::Allocate(actual_size, &actual_size, true));
   CHECK(buffer);
   HandleScope handles(isolate);
-  MacroAssembler masm(isolate, buffer, static_cast<int>(actual_size));
+  MacroAssembler masm(isolate, buffer, static_cast<int>(actual_size),
+                      v8::internal::CodeObjectRequired::kYes);
   DoubleToIStub stub(isolate, source_reg, destination_reg, 0, true,
                      inline_fastpath);
 
@@ -72,11 +76,13 @@ ConvertDToIFunc MakeConvertDToIFuncTrampoline(Isolate* isolate,
   // Save registers make sure they don't get clobbered.
   int source_reg_offset = kDoubleSize;
   int reg_num = 0;
-  for (;reg_num < Register::NumAllocatableRegisters(); ++reg_num) {
+  for (; reg_num < Register::kNumRegisters; ++reg_num) {
     Register reg = Register::from_code(reg_num);
-    if (!reg.is(destination_reg)) {
-      queue.Queue(reg);
-      source_reg_offset += kPointerSize;
+    if (reg.IsAllocatable()) {
+      if (!reg.is(destination_reg)) {
+        queue.Queue(reg);
+        source_reg_offset += kPointerSize;
+      }
     }
   }
   // Re-push the double argument.
@@ -101,10 +107,12 @@ ConvertDToIFunc MakeConvertDToIFuncTrampoline(Isolate* isolate,
   // // Make sure no registers have been unexpectedly clobbered
   for (--reg_num; reg_num >= 0; --reg_num) {
     Register reg = Register::from_code(reg_num);
-    if (!reg.is(destination_reg)) {
-      __ Pop(ip0);
-      __ cmp(reg, ip0);
-      __ Assert(eq, kRegisterWasClobbered);
+    if (reg.IsAllocatable()) {
+      if (!reg.is(destination_reg)) {
+        __ Pop(ip0);
+        __ cmp(reg, ip0);
+        __ Assert(eq, kRegisterWasClobbered);
+      }
     }
   }
 
@@ -122,7 +130,7 @@ ConvertDToIFunc MakeConvertDToIFuncTrampoline(Isolate* isolate,
 
   CodeDesc desc;
   masm.GetCode(&desc);
-  CpuFeatures::FlushICache(buffer, actual_size);
+  Assembler::FlushICache(isolate, buffer, actual_size);
   return (reinterpret_cast<ConvertDToIFunc>(
       reinterpret_cast<intptr_t>(buffer)));
 }
@@ -142,7 +150,7 @@ int32_t RunGeneratedCodeCallWrapper(ConvertDToIFunc func,
       Simulator::CallArgument(from),
       Simulator::CallArgument::End()
   };
-  return static_cast<int32_t>(Simulator::current(Isolate::Current())
+  return static_cast<int32_t>(Simulator::current(CcTest::i_isolate())
                                   ->CallInt64(FUNCTION_ADDR(func), args));
 #else
   return (*func)(from);

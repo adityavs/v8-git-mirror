@@ -5,6 +5,9 @@
 
 #include "src/i18n.h"
 
+#include "src/api.h"
+#include "src/factory.h"
+#include "src/isolate.h"
 #include "unicode/brkiter.h"
 #include "unicode/calendar.h"
 #include "unicode/coll.h"
@@ -13,6 +16,7 @@
 #include "unicode/decimfmt.h"
 #include "unicode/dtfmtsym.h"
 #include "unicode/dtptngen.h"
+#include "unicode/gregocal.h"
 #include "unicode/locid.h"
 #include "unicode/numfmt.h"
 #include "unicode/numsys.h"
@@ -92,6 +96,16 @@ icu::SimpleDateFormat* CreateICUDateFormat(
   UErrorCode status = U_ZERO_ERROR;
   icu::Calendar* calendar =
       icu::Calendar::createInstance(tz, icu_locale, status);
+
+  if (calendar->getDynamicClassID() ==
+      icu::GregorianCalendar::getStaticClassID()) {
+    icu::GregorianCalendar* gc = (icu::GregorianCalendar*)calendar;
+    UErrorCode status = U_ZERO_ERROR;
+    // The beginning of ECMAScript time, namely -(2**53)
+    const double start_of_time = -9007199254740992;
+    gc->setGregorianChange(start_of_time, status);
+    DCHECK(U_SUCCESS(status));
+  }
 
   // Make formatter from skeleton. Calendar and numbering system are added
   // to the locale as Unicode extension (if they were specified at all).
@@ -258,7 +272,24 @@ icu::DecimalFormat* CreateICUNumberFormat(
 #endif
 
       number_format = static_cast<icu::DecimalFormat*>(
-          icu::NumberFormat::createInstance(icu_locale, format_style,  status));
+          icu::NumberFormat::createInstance(icu_locale, format_style, status));
+
+      if (U_FAILURE(status)) {
+        delete number_format;
+        return NULL;
+      }
+
+      UErrorCode status_digits = U_ZERO_ERROR;
+      uint32_t fraction_digits = ucurr_getDefaultFractionDigits(
+        currency.getTerminatedBuffer(), &status_digits);
+      if (U_SUCCESS(status_digits)) {
+        number_format->setMinimumFractionDigits(fraction_digits);
+        number_format->setMaximumFractionDigits(fraction_digits);
+      } else {
+        // Set min & max to default values (previously in i18n.js)
+        number_format->setMinimumFractionDigits(0);
+        number_format->setMaximumFractionDigits(3);
+      }
     } else if (style == UNICODE_STRING_SIMPLE("percent")) {
       number_format = static_cast<icu::DecimalFormat*>(
           icu::NumberFormat::createPercentInstance(icu_locale, status));

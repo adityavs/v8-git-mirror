@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// TODO(mythria): Remove this define after this flag is turned on globally
+#define V8_IMMINENT_DEPRECATION_WARNINGS
+
 #include <stdlib.h>
 #include <utility>
 
@@ -84,7 +87,9 @@ TEST(TransitionArray_SimpleFieldTransitions) {
           (key == *name2 && target == *map2));
   }
 
-  DCHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#ifdef DEBUG
+  CHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#endif
 }
 
 
@@ -133,7 +138,9 @@ TEST(TransitionArray_FullFieldTransitions) {
           (key == *name2 && target == *map2));
   }
 
-  DCHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#ifdef DEBUG
+  CHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#endif
 }
 
 
@@ -180,7 +187,9 @@ TEST(TransitionArray_DifferentFieldNames) {
     }
   }
 
-  DCHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#ifdef DEBUG
+  CHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#endif
 }
 
 
@@ -221,7 +230,9 @@ TEST(TransitionArray_SameFieldNamesDifferentAttributesSimple) {
     CHECK_EQ(*name, TransitionArray::GetKey(map0->raw_transitions(), i));
   }
 
-  DCHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#ifdef DEBUG
+  CHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#endif
 }
 
 
@@ -299,5 +310,7 @@ TEST(TransitionArray_SameFieldNamesDifferentAttributes) {
     }
   }
 
-  DCHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#ifdef DEBUG
+  CHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#endif
 }

@@ -4,6 +4,7 @@
 
 #include "src/base/functional.h"
 #include "src/compiler/frame-states.h"
+#include "src/handles-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -52,6 +53,9 @@ std::ostream& operator<<(std::ostream& os, FrameStateType type) {
       break;
     case FrameStateType::kArgumentsAdaptor:
       os << "ARGUMENTS_ADAPTOR";
+      break;
+    case FrameStateType::kConstructStub:
+      os << "CONSTRUCT_STUB";
       break;
   }
   return os;

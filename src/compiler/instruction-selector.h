@@ -22,6 +22,7 @@ class BasicBlock;
 struct CallBuffer;  // TODO(bmeurer): Remove this.
 class FlagsContinuation;
 class Linkage;
+class OperandGenerator;
 struct SwitchInfo;
 
 typedef ZoneVector<InstructionOperand> InstructionOperandVector;
@@ -163,18 +164,23 @@ class InstructionSelector final {
   // operand {op}.
   void MarkAsRepresentation(MachineType rep, const InstructionOperand& op);
 
+  enum CallBufferFlag {
+    kCallCodeImmediate = 1u << 0,
+    kCallAddressImmediate = 1u << 1,
+    kCallTail = 1u << 2
+  };
+  typedef base::Flags<CallBufferFlag> CallBufferFlags;
+
   // Initialize the call buffer with the InstructionOperands, nodes, etc,
   // corresponding
   // to the inputs and outputs of the call.
   // {call_code_immediate} to generate immediate operands to calls of code.
   // {call_address_immediate} to generate immediate operands to address calls.
   void InitializeCallBuffer(Node* call, CallBuffer* buffer,
-                            bool call_code_immediate,
-                            bool call_address_immediate);
+                            CallBufferFlags flags, int stack_param_delta = 0);
+  bool IsTailCallAddressImmediate();
 
   FrameStateDescriptor* GetFrameStateDescriptor(Node* node);
-  void AddFrameStateInputs(Node* state, InstructionOperandVector* inputs,
-                           FrameStateDescriptor* descriptor);
 
   // ===========================================================================
   // ============= Architecture-specific graph covering methods. ===============
@@ -194,7 +200,8 @@ class InstructionSelector final {
   MACHINE_OP_LIST(DECLARE_GENERATOR)
 #undef DECLARE_GENERATOR
 
-  void VisitFinish(Node* node);
+  void VisitFinishRegion(Node* node);
+  void VisitGuard(Node* node);
   void VisitParameter(Node* node);
   void VisitIfException(Node* node);
   void VisitOsrValue(Node* node);
@@ -207,8 +214,11 @@ class InstructionSelector final {
   void VisitBranch(Node* input, BasicBlock* tbranch, BasicBlock* fbranch);
   void VisitSwitch(Node* node, const SwitchInfo& sw);
   void VisitDeoptimize(Node* value);
-  void VisitReturn(Node* value);
+  void VisitReturn(Node* ret);
   void VisitThrow(Node* value);
+
+  void EmitPrepareArguments(NodeVector* arguments,
+                            const CallDescriptor* descriptor, Node* node);
 
   // ===========================================================================
 

@@ -25,6 +25,9 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+// TODO(jochen): Remove this after the setting is turned on globally.
+#define V8_IMMINENT_DEPRECATION_WARNINGS
+
 #include "src/v8.h"
 
 #include "src/base/atomicops.h"
@@ -157,21 +160,11 @@ static void TestAtomicExchange() {
 
 template <class AtomicType>
 static void TestAtomicIncrementBounds() {
-  // Test at rollover boundary between int_max and int_min.
-  AtomicType test_val =
-      static_cast<AtomicType>(1) << (NUM_BITS(AtomicType) - 1);
-  AtomicType value = -1 ^ test_val;
-  AtomicType new_value = NoBarrier_AtomicIncrement(&value, 1);
-  CHECK_EQU(test_val, value);
-  CHECK_EQU(value, new_value);
-
-  NoBarrier_AtomicIncrement(&value, -1);
-  CHECK_EQU(-1 ^ test_val, value);
-
   // Test at 32-bit boundary for 64-bit atomic type.
-  test_val = static_cast<AtomicType>(1) << (NUM_BITS(AtomicType) / 2);
-  value = test_val - 1;
-  new_value = NoBarrier_AtomicIncrement(&value, 1);
+  AtomicType test_val = static_cast<AtomicType>(1)
+                        << (NUM_BITS(AtomicType) / 2);
+  AtomicType value = test_val - 1;
+  AtomicType new_value = NoBarrier_AtomicIncrement(&value, 1);
   CHECK_EQU(test_val, value);
   CHECK_EQU(value, new_value);
 

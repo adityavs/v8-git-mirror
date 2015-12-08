@@ -2,10 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/ic/ic-state.h"
 
 #include "src/ic/ic.h"
-#include "src/ic/ic-state.h"
 
 namespace v8 {
 namespace internal {
@@ -17,22 +16,8 @@ void ICUtility::Clear(Isolate* isolate, Address address,
 }
 
 
-CallICState::CallICState(ExtraICState extra_ic_state)
-    : argc_(ArgcBits::decode(extra_ic_state)),
-      call_type_(CallTypeBits::decode(extra_ic_state)) {}
-
-
-ExtraICState CallICState::GetExtraICState() const {
-  ExtraICState extra_ic_state =
-      ArgcBits::encode(argc_) | CallTypeBits::encode(call_type_);
-  return extra_ic_state;
-}
-
-
 std::ostream& operator<<(std::ostream& os, const CallICState& s) {
-  return os << "(args(" << s.arg_count() << "), "
-            << (s.call_type() == CallICState::METHOD ? "METHOD" : "FUNCTION")
-            << ", ";
+  return os << "(args(" << s.argc() << "), " << s.convert_mode() << ", ";
 }
 
 
@@ -206,17 +191,17 @@ void BinaryOpICState::GenerateAheadOfTime(
 }
 
 
-Type* BinaryOpICState::GetResultType(Zone* zone) const {
+Type* BinaryOpICState::GetResultType() const {
   Kind result_kind = result_kind_;
   if (HasSideEffects()) {
     result_kind = NONE;
   } else if (result_kind == GENERIC && op_ == Token::ADD) {
-    return Type::Union(Type::Number(zone), Type::String(zone), zone);
+    return Type::NumberOrString();
   } else if (result_kind == NUMBER && op_ == Token::SHR) {
-    return Type::Unsigned32(zone);
+    return Type::Unsigned32();
   }
   DCHECK_NE(GENERIC, result_kind);
-  return KindToType(result_kind, zone);
+  return KindToType(result_kind);
 }
 
 
@@ -335,20 +320,20 @@ const char* BinaryOpICState::KindToString(Kind kind) {
 
 
 // static
-Type* BinaryOpICState::KindToType(Kind kind, Zone* zone) {
+Type* BinaryOpICState::KindToType(Kind kind) {
   switch (kind) {
     case NONE:
-      return Type::None(zone);
+      return Type::None();
     case SMI:
-      return Type::SignedSmall(zone);
+      return Type::SignedSmall();
     case INT32:
-      return Type::Signed32(zone);
+      return Type::Signed32();
     case NUMBER:
-      return Type::Number(zone);
+      return Type::Number();
     case STRING:
-      return Type::String(zone);
+      return Type::String();
     case GENERIC:
-      return Type::Any(zone);
+      return Type::Any();
   }
   UNREACHABLE();
   return NULL;
@@ -359,6 +344,8 @@ const char* CompareICState::GetStateName(State state) {
   switch (state) {
     case UNINITIALIZED:
       return "UNINITIALIZED";
+    case BOOLEAN:
+      return "BOOLEAN";
     case SMI:
       return "SMI";
     case NUMBER:
@@ -369,10 +356,10 @@ const char* CompareICState::GetStateName(State state) {
       return "STRING";
     case UNIQUE_NAME:
       return "UNIQUE_NAME";
-    case OBJECT:
-      return "OBJECT";
-    case KNOWN_OBJECT:
-      return "KNOWN_OBJECT";
+    case RECEIVER:
+      return "RECEIVER";
+    case KNOWN_RECEIVER:
+      return "KNOWN_RECEIVER";
     case GENERIC:
       return "GENERIC";
   }
@@ -385,6 +372,8 @@ Type* CompareICState::StateToType(Zone* zone, State state, Handle<Map> map) {
   switch (state) {
     case UNINITIALIZED:
       return Type::None(zone);
+    case BOOLEAN:
+      return Type::Boolean(zone);
     case SMI:
       return Type::SignedSmall(zone);
     case NUMBER:
@@ -395,9 +384,9 @@ Type* CompareICState::StateToType(Zone* zone, State state, Handle<Map> map) {
       return Type::InternalizedString(zone);
     case UNIQUE_NAME:
       return Type::UniqueName(zone);
-    case OBJECT:
+    case RECEIVER:
       return Type::Receiver(zone);
-    case KNOWN_OBJECT:
+    case KNOWN_RECEIVER:
       return map.is_null() ? Type::Receiver(zone) : Type::Class(map, zone);
     case GENERIC:
       return Type::Any(zone);
@@ -411,12 +400,16 @@ CompareICState::State CompareICState::NewInputState(State old_state,
                                                     Handle<Object> value) {
   switch (old_state) {
     case UNINITIALIZED:
+      if (value->IsBoolean()) return BOOLEAN;
       if (value->IsSmi()) return SMI;
       if (value->IsHeapNumber()) return NUMBER;
       if (value->IsInternalizedString()) return INTERNALIZED_STRING;
       if (value->IsString()) return STRING;
       if (value->IsSymbol()) return UNIQUE_NAME;
-      if (value->IsJSObject()) return OBJECT;
+      if (value->IsJSReceiver()) return RECEIVER;
+      break;
+    case BOOLEAN:
+      if (value->IsBoolean()) return BOOLEAN;
       break;
     case SMI:
       if (value->IsSmi()) return SMI;
@@ -436,12 +429,12 @@ CompareICState::State CompareICState::NewInputState(State old_state,
     case UNIQUE_NAME:
       if (value->IsUniqueName()) return UNIQUE_NAME;
       break;
-    case OBJECT:
-      if (value->IsJSObject()) return OBJECT;
+    case RECEIVER:
+      if (value->IsJSReceiver()) return RECEIVER;
       break;
     case GENERIC:
       break;
-    case KNOWN_OBJECT:
+    case KNOWN_RECEIVER:
       UNREACHABLE();
       break;
   }
@@ -455,6 +448,7 @@ CompareICState::State CompareICState::TargetState(
     bool has_inlined_smi_code, Handle<Object> x, Handle<Object> y) {
   switch (old_state) {
     case UNINITIALIZED:
+      if (x->IsBoolean() && y->IsBoolean()) return BOOLEAN;
       if (x->IsSmi() && y->IsSmi()) return SMI;
       if (x->IsNumber() && y->IsNumber()) return NUMBER;
       if (Token::IsOrderedRelationalCompareOp(op)) {
@@ -471,16 +465,16 @@ CompareICState::State CompareICState::TargetState(
         return Token::IsEqualityOp(op) ? INTERNALIZED_STRING : STRING;
       }
       if (x->IsString() && y->IsString()) return STRING;
-      if (!Token::IsEqualityOp(op)) return GENERIC;
-      if (x->IsUniqueName() && y->IsUniqueName()) return UNIQUE_NAME;
-      if (x->IsJSObject() && y->IsJSObject()) {
-        if (Handle<JSObject>::cast(x)->map() ==
-            Handle<JSObject>::cast(y)->map()) {
-          return KNOWN_OBJECT;
+      if (x->IsJSReceiver() && y->IsJSReceiver()) {
+        if (Handle<JSReceiver>::cast(x)->map() ==
+            Handle<JSReceiver>::cast(y)->map()) {
+          return KNOWN_RECEIVER;
         } else {
-          return OBJECT;
+          return Token::IsEqualityOp(op) ? RECEIVER : GENERIC;
         }
       }
+      if (!Token::IsEqualityOp(op)) return GENERIC;
+      if (x->IsUniqueName() && y->IsUniqueName()) return UNIQUE_NAME;
       return GENERIC;
     case SMI:
       return x->IsNumber() && y->IsNumber() ? NUMBER : GENERIC;
@@ -496,20 +490,21 @@ CompareICState::State CompareICState::TargetState(
       if (old_left == SMI && x->IsHeapNumber()) return NUMBER;
       if (old_right == SMI && y->IsHeapNumber()) return NUMBER;
       return GENERIC;
-    case KNOWN_OBJECT:
-      DCHECK(Token::IsEqualityOp(op));
-      if (x->IsJSObject() && y->IsJSObject()) {
-        return OBJECT;
+    case KNOWN_RECEIVER:
+      if (x->IsJSReceiver() && y->IsJSReceiver()) {
+        return Token::IsEqualityOp(op) ? RECEIVER : GENERIC;
       }
       return GENERIC;
+    case BOOLEAN:
     case STRING:
     case UNIQUE_NAME:
-    case OBJECT:
+    case RECEIVER:
     case GENERIC:
       return GENERIC;
   }
   UNREACHABLE();
   return GENERIC;  // Make the compiler happy.
 }
+
 }  // namespace internal
 }  // namespace v8
