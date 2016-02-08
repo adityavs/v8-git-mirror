@@ -74,6 +74,7 @@ class Decoder {
   void PrintFt(Instruction* instr);
   void PrintFd(Instruction* instr);
   void PrintSa(Instruction* instr);
+  void PrintLsaSa(Instruction* instr);
   void PrintSd(Instruction* instr);
   void PrintSs1(Instruction* instr);
   void PrintSs2(Instruction* instr);
@@ -215,6 +216,13 @@ void Decoder::PrintFd(Instruction* instr) {
 // Print the integer value of the sa field.
 void Decoder::PrintSa(Instruction* instr) {
   int sa = instr->SaValue();
+  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", sa);
+}
+
+
+// Print the integer value of the sa field of a lsa instruction.
+void Decoder::PrintLsaSa(Instruction* instr) {
+  int sa = instr->LsaSaValue() + 1;
   out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", sa);
 }
 
@@ -683,11 +691,17 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
     }
     case 's': {   // 'sa.
       switch (format[1]) {
-        case 'a': {
-          DCHECK(STRING_STARTS_WITH(format, "sa"));
-          PrintSa(instr);
-          return 2;
-        }
+        case 'a':
+          if (format[2] == '2') {
+            DCHECK(STRING_STARTS_WITH(format, "sa2"));  // 'sa2
+            PrintLsaSa(instr);
+            return 3;
+          } else {
+            DCHECK(STRING_STARTS_WITH(format, "sa"));
+            PrintSa(instr);
+            return 2;
+          }
+          break;
         case 'd': {
           DCHECK(STRING_STARTS_WITH(format, "sd"));
           PrintSd(instr);
@@ -1057,6 +1071,9 @@ void Decoder::DecodeTypeRegisterSPECIAL(Instruction* instr) {
       break;
     case SRAV:
       Format(instr, "srav    'rd, 'rt, 'rs");
+      break;
+    case LSA:
+      Format(instr, "lsa     'rd, 'rt, 'rs, 'sa2");
       break;
     case MFHI:
       if (instr->Bits(25, 16) == 0) {
@@ -1483,6 +1500,7 @@ void Decoder::DecodeTypeImmediate(Instruction* instr) {
         if (rs_reg >= rt_reg) {
           Format(instr, "bovc  'rs, 'rt, 'imm16s -> 'imm16p4s2");
         } else {
+          DCHECK(rt_reg > 0);
           if (rs_reg == 0) {
             Format(instr, "beqzalc 'rt, 'imm16s -> 'imm16p4s2");
           } else {
@@ -1499,6 +1517,7 @@ void Decoder::DecodeTypeImmediate(Instruction* instr) {
         if (rs_reg >= rt_reg) {
           Format(instr, "bnvc  'rs, 'rt, 'imm16s -> 'imm16p4s2");
         } else {
+          DCHECK(rt_reg > 0);
           if (rs_reg == 0) {
             Format(instr, "bnezalc 'rt, 'imm16s -> 'imm16p4s2");
           } else {

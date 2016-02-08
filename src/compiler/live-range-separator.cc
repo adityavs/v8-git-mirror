@@ -45,7 +45,8 @@ void CreateSplinter(TopLevelLiveRange *range, RegisterAllocationData *data,
       data->CreateSpillRangeForLiveRange(range);
     }
     if (range->splinter() == nullptr) {
-      TopLevelLiveRange *splinter = data->NextLiveRange(range->machine_type());
+      TopLevelLiveRange *splinter =
+          data->NextLiveRange(range->representation());
       DCHECK_NULL(data->live_ranges()[splinter->vreg()]);
       data->live_ranges()[splinter->vreg()] = splinter;
       range->SetSplinter(splinter);
@@ -68,9 +69,9 @@ void SplinterLiveRange(TopLevelLiveRange *range, RegisterAllocationData *data) {
   while (interval != nullptr) {
     UseInterval *next_interval = interval->next();
     const InstructionBlock *first_block =
-        code->GetInstructionBlock(interval->FirstInstructionIndex());
+        code->GetInstructionBlock(interval->FirstGapIndex());
     const InstructionBlock *last_block =
-        code->GetInstructionBlock(interval->LastInstructionIndex());
+        code->GetInstructionBlock(interval->LastGapIndex());
     int first_block_nr = first_block->rpo_number().ToInt();
     int last_block_nr = last_block->rpo_number().ToInt();
     for (int block_id = first_block_nr; block_id <= last_block_nr; ++block_id) {
@@ -109,7 +110,7 @@ void LiveRangeSeparator::Splinter() {
     if (range == nullptr || range->IsEmpty() || range->IsSplinter()) {
       continue;
     }
-    int first_instr = range->first_interval()->FirstInstructionIndex();
+    int first_instr = range->first_interval()->FirstGapIndex();
     if (!data()->code()->GetInstructionBlock(first_instr)->IsDeferred()) {
       SplinterLiveRange(range, data());
     }
@@ -118,8 +119,10 @@ void LiveRangeSeparator::Splinter() {
 
 
 void LiveRangeMerger::MarkRangesSpilledInDeferredBlocks() {
+  const InstructionSequence *code = data()->code();
   for (TopLevelLiveRange *top : data()->live_ranges()) {
-    if (top == nullptr || top->IsEmpty() || top->splinter() == nullptr) {
+    if (top == nullptr || top->IsEmpty() || top->splinter() == nullptr ||
+        top->HasSpillOperand() || !top->splinter()->HasSpillRange()) {
       continue;
     }
 
@@ -130,7 +133,10 @@ void LiveRangeMerger::MarkRangesSpilledInDeferredBlocks() {
         break;
       }
     }
-    if (child == nullptr) top->MarkSpilledInDeferredBlock();
+    if (child == nullptr) {
+      top->TreatAsSpilledInDeferredBlock(data()->allocation_zone(),
+                                         code->InstructionBlockCount());
+    }
   }
 }
 

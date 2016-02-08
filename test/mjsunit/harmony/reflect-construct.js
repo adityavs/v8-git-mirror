@@ -279,10 +279,7 @@
 (function() {
   function* f() { yield 1; yield 2; }
   function* g() { yield 3; yield 4; }
-  var o = Reflect.construct(f, [], g);
-  assertEquals([1, 2], [...o]);
-  assertTrue(o.__proto__ === g.prototype);
-  assertTrue(o.__proto__ !== f.prototype);
+  assertThrows(()=>Reflect.construct(f, [], g));
 })();
 
 (function () {
@@ -295,32 +292,36 @@
       "Boolean",
       ["DataView", [new ArrayBuffer()]],
       "Date",
-      // "Error",
-      // "EvalError",
+      "Error",
+      "EvalError",
       "Float32Array",
       "Float64Array",
-      "Function",
-      "((function*(){}).constructor)",  // GeneratorFunction
+      ["Function", ["return 153;"]],
+      ["Function", ["'use strict'; return 153;"]],
+      ["Function", ["'use strong'; return 153;"]],
+      ["((function*(){}).constructor)", ["yield 153;"]],  // GeneratorFunction
+      ["((function*(){}).constructor)", ["'use strict'; yield 153;"]],
+      ["((function*(){}).constructor)", ["'use strong'; yield 153;"]],
       "Int8Array",
       "Int16Array",
       "Int32Array",
       "Map",
       "Number",
       "Object",
-      // "Promise",
-      // "RangeError",
-      // "ReferenceError",
+      ["Promise", [(resolve, reject)=>{}]],
+      "RangeError",
+      "ReferenceError",
       "RegExp",
       "Set",
       "String",
-      // "SyntaxError",
+      "SyntaxError",
       // %TypedArray%?
-      // "TypeError",
+      "TypeError",
       "Uint8Array",
       "Uint8ClampedArray",
       "Uint16Array",
       "Uint32Array",
-      // "URIError",
+      "URIError",
       "WeakMap",
       "WeakSet"
   ];

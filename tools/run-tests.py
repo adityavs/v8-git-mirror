@@ -60,23 +60,33 @@ ARCH_GUESS = utils.DefaultArch()
 # expected runtimes (suites with slow test cases first). These groups are
 # invoked in seperate steps on the bots.
 TEST_MAP = {
+  # This needs to stay in sync with test/bot_default.isolate.
   "bot_default": [
     "mjsunit",
     "cctest",
     "webkit",
+    "fuzzer",
     "message",
     "preparser",
     "intl",
     "unittests",
   ],
+  # This needs to stay in sync with test/default.isolate.
   "default": [
     "mjsunit",
     "cctest",
+    "fuzzer",
     "message",
     "preparser",
     "intl",
     "unittests",
   ],
+  # This needs to stay in sync with test/ignition.isolate.
+  "ignition": [
+    "mjsunit",
+    "cctest",
+  ],
+  # This needs to stay in sync with test/optimize_for_size.isolate.
   "optimize_for_size": [
     "mjsunit",
     "cctest",
@@ -223,6 +233,9 @@ def BuildOptions():
                     default="dontcare")
   result.add_option("--gc-stress",
                     help="Switch on GC stress mode",
+                    default=False, action="store_true")
+  result.add_option("--gcov-coverage",
+                    help="Uses executables instrumented for gcov coverage",
                     default=False, action="store_true")
   result.add_option("--command-prefix",
                     help="Prepended to each shell command used to run a test",
@@ -586,7 +599,7 @@ def Main():
   # suites as otherwise filters would break.
   def ExpandTestGroups(name):
     if name in TEST_MAP:
-      return [suite for suite in TEST_MAP[arg]]
+      return [suite for suite in TEST_MAP[name]]
     else:
       return [name]
   args = reduce(lambda x, y: x + y,
@@ -688,6 +701,7 @@ def Execute(arch, mode, args, options, suites):
     "asan": options.asan,
     "deopt_fuzzer": False,
     "gc_stress": options.gc_stress,
+    "gcov_coverage": options.gcov_coverage,
     "ignition": options.ignition,
     "isolates": options.isolates,
     "mode": MODES[mode]["status_mode"],

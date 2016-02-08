@@ -32,16 +32,18 @@ class Interpreter {
   explicit Interpreter(Isolate* isolate);
   virtual ~Interpreter() {}
 
-  // Creates an uninitialized interpreter handler table, where each handler
-  // points to the Illegal builtin.
-  static Handle<FixedArray> CreateUninitializedInterpreterTable(
-      Isolate* isolate);
-
-  // Initializes the interpreter.
+  // Initializes the interpreter dispatch table.
   void Initialize();
 
   // Generate bytecode for |info|.
   static bool MakeBytecode(CompilationInfo* info);
+
+  // GC support.
+  void IterateDispatchTable(ObjectVisitor* v);
+
+  Address dispatch_table_address() {
+    return reinterpret_cast<Address>(&dispatch_table_[0]);
+  }
 
  private:
 // Bytecode handler generator functions.
@@ -87,6 +89,18 @@ class Interpreter {
   // Generates code to perform a JS call.
   void DoJSCall(compiler::InterpreterAssembler* assembler);
 
+  // Generates code to perform a runtime call.
+  void DoCallRuntimeCommon(compiler::InterpreterAssembler* assembler);
+
+  // Generates code to perform a runtime call returning a pair.
+  void DoCallRuntimeForPairCommon(compiler::InterpreterAssembler* assembler);
+
+  // Generates code to perform a JS runtime call.
+  void DoCallJSRuntimeCommon(compiler::InterpreterAssembler* assembler);
+
+  // Generates code to perform a constructor call..
+  void DoCallConstruct(compiler::InterpreterAssembler* assembler);
+
   // Generates code ro create a literal via |function_id|.
   void DoCreateLiteral(Runtime::FunctionId function_id,
                        compiler::InterpreterAssembler* assembler);
@@ -95,9 +109,20 @@ class Interpreter {
   void DoDelete(Runtime::FunctionId function_id,
                 compiler::InterpreterAssembler* assembler);
 
-  bool IsInterpreterTableInitialized(Handle<FixedArray> handler_table);
+  // Generates code to perform a lookup slot load via |function_id|.
+  void DoLoadLookupSlot(Runtime::FunctionId function_id,
+                        compiler::InterpreterAssembler* assembler);
+
+  // Generates code to perform a lookup slot store depending on |language_mode|.
+  void DoStoreLookupSlot(LanguageMode language_mode,
+                         compiler::InterpreterAssembler* assembler);
+
+  bool IsDispatchTableInitialized();
+
+  static const int kDispatchTableSize = static_cast<int>(Bytecode::kLast) + 1;
 
   Isolate* isolate_;
+  Object* dispatch_table_[kDispatchTableSize];
 
   DISALLOW_COPY_AND_ASSIGN(Interpreter);
 };

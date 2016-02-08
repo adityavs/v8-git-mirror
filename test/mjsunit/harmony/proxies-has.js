@@ -49,8 +49,15 @@ assertThrows("'nonconf' in proxy", TypeError);
 
 // Step 9b iii. Trap result must confirm presence of all own properties of
 // non-extensible targets.
-Object.freeze(target);
+Object.preventExtensions(target);
 assertThrows("'nonconf' in proxy", TypeError);
 assertThrows("'target_one' in proxy", TypeError);
 assertFalse("target_two" in proxy);
 assertFalse("in_your_dreams" in proxy);
+
+// Regression test for crbug.com/570120 (stray JSObject::cast).
+(function TestHasPropertyFastPath() {
+  var proxy = new Proxy({}, {});
+  var object = Object.create(proxy);
+  object.hasOwnProperty(0);
+})();

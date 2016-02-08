@@ -62,20 +62,22 @@ std::ostream& operator<<(std::ostream& os, WriteBarrierKind);
 // A Load needs a MachineType.
 typedef MachineType LoadRepresentation;
 
+LoadRepresentation LoadRepresentationOf(Operator const*);
 
 // A Store needs a MachineType and a WriteBarrierKind in order to emit the
 // correct write barrier.
 class StoreRepresentation final {
  public:
-  StoreRepresentation(MachineType machine_type,
+  StoreRepresentation(MachineRepresentation representation,
                       WriteBarrierKind write_barrier_kind)
-      : machine_type_(machine_type), write_barrier_kind_(write_barrier_kind) {}
+      : representation_(representation),
+        write_barrier_kind_(write_barrier_kind) {}
 
-  MachineType machine_type() const { return machine_type_; }
+  MachineRepresentation representation() const { return representation_; }
   WriteBarrierKind write_barrier_kind() const { return write_barrier_kind_; }
 
  private:
-  MachineType machine_type_;
+  MachineRepresentation representation_;
   WriteBarrierKind write_barrier_kind_;
 };
 
@@ -96,10 +98,11 @@ CheckedLoadRepresentation CheckedLoadRepresentationOf(Operator const*);
 
 
 // A CheckedStore needs a MachineType.
-typedef MachineType CheckedStoreRepresentation;
+typedef MachineRepresentation CheckedStoreRepresentation;
 
 CheckedStoreRepresentation CheckedStoreRepresentationOf(Operator const*);
 
+MachineRepresentation StackSlotRepresentationOf(Operator const* op);
 
 // Interface for building machine-level operators. These operators are
 // machine-level but machine-independent and thus define a language suitable
@@ -141,8 +144,10 @@ class MachineOperatorBuilder final : public ZoneObject {
   };
   typedef base::Flags<Flag, unsigned> Flags;
 
-  explicit MachineOperatorBuilder(Zone* zone, MachineType word = kMachPtr,
-                                  Flags supportedOperators = kNoFlags);
+  explicit MachineOperatorBuilder(
+      Zone* zone,
+      MachineRepresentation word = MachineType::PointerRepresentation(),
+      Flags supportedOperators = kNoFlags);
 
   const Operator* Word32And();
   const Operator* Word32Or();
@@ -188,7 +193,9 @@ class MachineOperatorBuilder final : public ZoneObject {
   bool Uint32DivIsSafe() const { return flags_ & kUint32DivIsSafe; }
 
   const Operator* Int64Add();
+  const Operator* Int64AddWithOverflow();
   const Operator* Int64Sub();
+  const Operator* Int64SubWithOverflow();
   const Operator* Int64Mul();
   const Operator* Int64Div();
   const Operator* Int64Mod();
@@ -207,10 +214,12 @@ class MachineOperatorBuilder final : public ZoneObject {
   const Operator* ChangeFloat32ToFloat64();
   const Operator* ChangeFloat64ToInt32();   // narrowing
   const Operator* ChangeFloat64ToUint32();  // narrowing
-  const Operator* TruncateFloat32ToInt64();
+  const Operator* TruncateFloat32ToInt32();
+  const Operator* TruncateFloat32ToUint32();
+  const Operator* TryTruncateFloat32ToInt64();
   const Operator* TryTruncateFloat64ToInt64();
-  const Operator* TruncateFloat32ToUint64();
-  const Operator* TruncateFloat64ToUint64();
+  const Operator* TryTruncateFloat32ToUint64();
+  const Operator* TryTruncateFloat64ToUint64();
   const Operator* ChangeInt32ToFloat64();
   const Operator* ChangeInt32ToInt64();
   const Operator* ChangeUint32ToFloat64();
@@ -221,8 +230,10 @@ class MachineOperatorBuilder final : public ZoneObject {
   const Operator* TruncateFloat64ToFloat32();
   const Operator* TruncateFloat64ToInt32(TruncationMode);
   const Operator* TruncateInt64ToInt32();
+  const Operator* RoundInt32ToFloat32();
   const Operator* RoundInt64ToFloat32();
   const Operator* RoundInt64ToFloat64();
+  const Operator* RoundUint32ToFloat32();
   const Operator* RoundUint64ToFloat32();
   const Operator* RoundUint64ToFloat64();
 
@@ -297,6 +308,8 @@ class MachineOperatorBuilder final : public ZoneObject {
   // store [base + index], value
   const Operator* Store(StoreRepresentation rep);
 
+  const Operator* StackSlot(MachineRepresentation rep);
+
   // Access to the machine stack.
   const Operator* LoadStackPointer();
   const Operator* LoadFramePointer();
@@ -307,9 +320,9 @@ class MachineOperatorBuilder final : public ZoneObject {
   const Operator* CheckedStore(CheckedStoreRepresentation);
 
   // Target machine word-size assumed by this builder.
-  bool Is32() const { return word() == kRepWord32; }
-  bool Is64() const { return word() == kRepWord64; }
-  MachineType word() const { return word_; }
+  bool Is32() const { return word() == MachineRepresentation::kWord32; }
+  bool Is64() const { return word() == MachineRepresentation::kWord64; }
+  MachineRepresentation word() const { return word_; }
 
 // Pseudo operators that translate to 32/64-bit operators depending on the
 // word-size of the target machine assumed by this builder.
@@ -342,7 +355,7 @@ class MachineOperatorBuilder final : public ZoneObject {
 
  private:
   MachineOperatorGlobalCache const& cache_;
-  MachineType const word_;
+  MachineRepresentation const word_;
   Flags const flags_;
 
   DISALLOW_COPY_AND_ASSIGN(MachineOperatorBuilder);

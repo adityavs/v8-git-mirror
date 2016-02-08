@@ -6,6 +6,7 @@
 #define V8_AST_SCOPES_H_
 
 #include "src/ast/ast.h"
+#include "src/hashmap.h"
 #include "src/pending-compilation-error-handler.h"
 #include "src/zone.h"
 
@@ -207,6 +208,15 @@ class Scope: public ZoneObject {
   // Variable* around.  The name should not clash with a legitimate variable
   // names.
   Variable* NewTemporary(const AstRawString* name);
+
+  // Remove a temporary variable. This is for adjusting the scope of
+  // temporaries used when desugaring parameter initializers.
+  bool RemoveTemporary(Variable* var);
+
+  // Adds a temporary variable in this scope's TemporaryScope. This is for
+  // adjusting the scope of temporaries used when desugaring parameter
+  // initializers.
+  void AddTemporary(Variable* var) { temps_.Add(var, zone()); }
 
   // Adds the specific declaration node to the list of declarations in
   // this scope. The declarations are processed as part of entering
@@ -420,6 +430,15 @@ class Scope: public ZoneObject {
 
   int num_parameters() const { return params_.length(); }
 
+  // A function can have at most one rest parameter. Returns Variable* or NULL.
+  Variable* rest_parameter(int* index) const {
+    *index = rest_index_;
+    if (rest_index_ < 0) return NULL;
+    return rest_parameter_;
+  }
+
+  bool has_rest_parameter() const { return rest_index_ >= 0; }
+
   bool has_simple_parameters() const {
     return has_simple_parameters_;
   }
@@ -544,6 +563,8 @@ class Scope: public ZoneObject {
   // and will be returned, but no inner function scopes.
   void GetNestedScopeChain(Isolate* isolate, List<Handle<ScopeInfo> >* chain,
                            int statement_position);
+
+  void CollectNonLocals(HashMap* non_locals);
 
   // ---------------------------------------------------------------------------
   // Strict mode support.
@@ -679,6 +700,7 @@ class Scope: public ZoneObject {
   int arity_;
   bool has_simple_parameters_;
   Variable* rest_parameter_;
+  int rest_index_;
 
   // Serialized scope info support.
   Handle<ScopeInfo> scope_info_;

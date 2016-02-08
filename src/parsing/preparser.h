@@ -119,15 +119,12 @@ class PreParserExpression {
   static PreParserExpression BinaryOperation(PreParserExpression left,
                                              Token::Value op,
                                              PreParserExpression right) {
-    return PreParserExpression(
-        TypeField::encode(kBinaryOperationExpression) |
-        HasRestField::encode(op == Token::COMMA &&
-                             right->IsSpreadExpression()));
+    return PreParserExpression(TypeField::encode(kBinaryOperationExpression));
   }
 
-  static PreParserExpression AssignmentPattern() {
+  static PreParserExpression Assignment() {
     return PreParserExpression(TypeField::encode(kExpression) |
-                               ExpressionTypeField::encode(kAssignmentPattern));
+                               ExpressionTypeField::encode(kAssignment));
   }
 
   static PreParserExpression ObjectLiteral() {
@@ -195,9 +192,9 @@ class PreParserExpression {
     return PreParserIdentifier(IdentifierTypeField::decode(code_));
   }
 
-  bool IsAssignmentPattern() const {
+  bool IsAssignment() const {
     return TypeField::decode(code_) == kExpression &&
-           ExpressionTypeField::decode(code_) == kAssignmentPattern;
+           ExpressionTypeField::decode(code_) == kAssignment;
   }
 
   bool IsObjectLiteral() const {
@@ -265,14 +262,6 @@ class PreParserExpression {
     return TypeField::decode(code_) == kSpreadExpression;
   }
 
-  bool IsArrowFunctionFormalParametersWithRestParameter() const {
-    // Iff the expression classifier has determined that this expression is a
-    // valid arrow fformal parameter list, return true if the formal parameter
-    // list ends with a rest parameter.
-    return IsSpreadExpression() ||
-           (IsBinaryOperation() && HasRestField::decode(code_));
-  }
-
   PreParserExpression AsFunctionLiteral() { return *this; }
 
   bool IsBinaryOperation() const {
@@ -308,7 +297,7 @@ class PreParserExpression {
     kCallExpression,
     kSuperCallReference,
     kNoTemplateTagExpression,
-    kAssignmentPattern
+    kAssignment
   };
 
   explicit PreParserExpression(uint32_t expression_code)
@@ -317,6 +306,13 @@ class PreParserExpression {
   // The first three bits are for the Type.
   typedef BitField<Type, 0, 3> TypeField;
 
+  // The high order bit applies only to nodes which would inherit from the
+  // Expression ASTNode --- This is by necessity, due to the fact that
+  // Expression nodes may be represented as multiple Types, not exclusively
+  // through kExpression.
+  // TODO(caitp, adamk): clean up PreParserExpression bitfields.
+  typedef BitField<bool, 31, 1> ParenthesizedField;
+
   // The rest of the bits are interpreted depending on the value
   // of the Type field, so they can share the storage.
   typedef BitField<ExpressionType, TypeField::kNext, 3> ExpressionTypeField;
@@ -324,7 +320,6 @@ class PreParserExpression {
   typedef BitField<bool, IsUseStrictField::kNext, 1> IsUseStrongField;
   typedef BitField<PreParserIdentifier::Type, TypeField::kNext, 10>
       IdentifierTypeField;
-  typedef BitField<bool, TypeField::kNext, 1> HasRestField;
   typedef BitField<bool, TypeField::kNext, 1> HasCoverInitializedNameField;
 
   uint32_t code_;
@@ -498,12 +493,7 @@ class PreParserFactory {
                                     PreParserExpression left,
                                     PreParserExpression right,
                                     int pos) {
-    return PreParserExpression::Default();
-  }
-  PreParserExpression NewAssignmentPattern(PreParserExpression pattern,
-                                           int pos) {
-    DCHECK(pattern->IsObjectLiteral() || pattern->IsArrayLiteral());
-    return PreParserExpression::AssignmentPattern();
+    return PreParserExpression::Assignment();
   }
   PreParserExpression NewYield(PreParserExpression generator_object,
                                PreParserExpression expression,
@@ -544,18 +534,18 @@ class PreParserFactory {
     return PreParserStatement::Default();
   }
   PreParserExpression NewFunctionLiteral(
-      PreParserIdentifier name, AstValueFactory* ast_value_factory,
-      Scope* scope, PreParserStatementList body, int materialized_literal_count,
-      int expected_property_count, int parameter_count,
+      PreParserIdentifier name, Scope* scope, PreParserStatementList body,
+      int materialized_literal_count, int expected_property_count,
+      int parameter_count,
       FunctionLiteral::ParameterFlag has_duplicate_parameters,
       FunctionLiteral::FunctionType function_type,
-      FunctionLiteral::IsFunctionFlag is_function,
       FunctionLiteral::EagerCompileHint eager_compile_hint, FunctionKind kind,
       int position) {
     return PreParserExpression::Default();
   }
 
-  PreParserExpression NewSpread(PreParserExpression expression, int pos) {
+  PreParserExpression NewSpread(PreParserExpression expression, int pos,
+                                int expr_pos) {
     return PreParserExpression::Spread(expression);
   }
 
@@ -697,14 +687,6 @@ class PreParserTraits {
   static void CheckAssigningFunctionLiteralToProperty(
       PreParserExpression left, PreParserExpression right) {}
 
-  static void CheckPossibleEvalCall(PreParserExpression expression,
-                                    Scope* scope) {
-    if (IsIdentifier(expression) && IsEval(AsIdentifier(expression))) {
-      scope->DeclarationScope()->RecordEvalCall();
-      scope->RecordEvalCall();
-    }
-  }
-
   static PreParserExpression MarkExpressionAsAssigned(
       PreParserExpression expression) {
     // TODO(marja): To be able to produce the same errors, the preparser needs
@@ -810,8 +792,9 @@ class PreParserTraits {
     return PreParserExpression::Default();
   }
 
-  static PreParserExpression DefaultConstructor(bool call_super, Scope* scope,
-                                                int pos, int end_pos) {
+  static PreParserExpression FunctionSentExpression(Scope* scope,
+                                                    PreParserFactory* factory,
+                                                    int pos) {
     return PreParserExpression::Default();
   }
 
@@ -939,6 +922,21 @@ class PreParserTraits {
   inline void RewriteDestructuringAssignments() {}
 
   inline void QueueDestructuringAssignmentForRewriting(PreParserExpression) {}
+
+  void SetFunctionNameFromPropertyName(PreParserExpression,
+                                       PreParserIdentifier) {}
+  void SetFunctionNameFromIdentifierRef(PreParserExpression,
+                                        PreParserExpression) {}
+
+  inline PreParserExpression RewriteNonPattern(
+      PreParserExpression expr, const ExpressionClassifier* classifier,
+      bool* ok);
+  inline PreParserExpression RewriteNonPatternObjectLiteralProperty(
+      PreParserExpression property, const ExpressionClassifier* classifier,
+      bool* ok);
+
+  inline PreParserExpression RewriteYieldStar(
+      PreParserExpression generator, PreParserExpression expr, int pos);
 
  private:
   PreParser* pre_parser_;
@@ -1113,17 +1111,34 @@ void PreParserTraits::ParseArrowFunctionFormalParameterList(
     Scanner::Location* duplicate_loc, bool* ok) {
   // TODO(wingo): Detect duplicated identifiers in paramlists.  Detect parameter
   // lists that are too long.
-
-  // Accomodate array literal for rest parameter.
-  if (params.IsArrowFunctionFormalParametersWithRestParameter()) {
-    ++parameters->materialized_literals_count;
-    pre_parser_->function_state_->NextMaterializedLiteralIndex();
-  }
 }
 
 
 PreParserExpression PreParserTraits::ParseDoExpression(bool* ok) {
   return pre_parser_->ParseDoExpression(ok);
+}
+
+
+PreParserExpression PreParserTraits::RewriteNonPattern(
+    PreParserExpression expr, const ExpressionClassifier* classifier,
+    bool* ok) {
+  pre_parser_->ValidateExpression(classifier, ok);
+  return expr;
+}
+
+
+PreParserExpression PreParserTraits::RewriteNonPatternObjectLiteralProperty(
+    PreParserExpression property, const ExpressionClassifier* classifier,
+    bool* ok) {
+  pre_parser_->ValidateExpression(classifier, ok);
+  return property;
+}
+
+
+PreParserExpression PreParserTraits::RewriteYieldStar(
+    PreParserExpression generator, PreParserExpression expression, int pos) {
+  return pre_parser_->factory()->NewYield(
+      generator, expression, Yield::kDelegating, pos);
 }
 
 

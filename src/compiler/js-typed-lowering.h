@@ -35,6 +35,7 @@ class JSTypedLowering final : public AdvancedReducer {
   enum Flag {
     kNoFlags = 0u,
     kDeoptimizationEnabled = 1u << 0,
+    kDisableBinaryOpReduction = 1u << 1,
   };
   typedef base::Flags<Flag> Flags;
 
@@ -70,16 +71,15 @@ class JSTypedLowering final : public AdvancedReducer {
   Reduction ReduceJSCreate(Node* node);
   Reduction ReduceJSCreateArguments(Node* node);
   Reduction ReduceJSCreateArray(Node* node);
-  Reduction ReduceJSCreateClosure(Node* node);
-  Reduction ReduceJSCreateLiteralArray(Node* node);
-  Reduction ReduceJSCreateLiteralObject(Node* node);
+  Reduction ReduceJSCreateIterResultObject(Node* node);
   Reduction ReduceJSCreateFunctionContext(Node* node);
   Reduction ReduceJSCreateWithContext(Node* node);
+  Reduction ReduceJSCreateCatchContext(Node* node);
   Reduction ReduceJSCreateBlockContext(Node* node);
+  Reduction ReduceJSCallConstruct(Node* node);
   Reduction ReduceJSCallFunction(Node* node);
   Reduction ReduceJSForInDone(Node* node);
   Reduction ReduceJSForInNext(Node* node);
-  Reduction ReduceJSForInPrepare(Node* node);
   Reduction ReduceJSForInStep(Node* node);
   Reduction ReduceSelect(Node* node);
   Reduction ReduceNumberBinop(Node* node, const Operator* numberOp);
@@ -91,6 +91,8 @@ class JSTypedLowering final : public AdvancedReducer {
 
   Node* Word32Shl(Node* const lhs, int32_t const rhs);
   Node* AllocateArguments(Node* effect, Node* control, Node* frame_state);
+  Node* AllocateRestArguments(Node* effect, Node* control, Node* frame_state,
+                              int start_index);
   Node* AllocateAliasedArguments(Node* effect, Node* control, Node* frame_state,
                                  Node* context, Handle<SharedFunctionInfo>,
                                  bool* has_aliased_arguments);

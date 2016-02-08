@@ -22,7 +22,7 @@ LoopAssignmentAnalysis* ALAA::Analyze() {
   LoopAssignmentAnalysis* a = new (zone_) LoopAssignmentAnalysis(zone_);
   result_ = a;
   VisitStatements(info()->literal()->body());
-  result_ = NULL;
+  result_ = nullptr;
   return a;
 }
 
@@ -198,7 +198,7 @@ void ALAA::VisitCompareOperation(CompareOperation* e) {
 }
 
 
-void ALAA::VisitSpread(Spread* e) { Visit(e->expression()); }
+void ALAA::VisitSpread(Spread* e) { UNREACHABLE(); }
 
 
 void ALAA::VisitEmptyParentheses(EmptyParentheses* e) { UNREACHABLE(); }
@@ -266,7 +266,6 @@ void ALAA::VisitForOfStatement(ForOfStatement* loop) {
   Visit(loop->assign_iterator());
   Enter(loop);
   Visit(loop->assign_each());
-  Visit(loop->each());
   Visit(loop->subject());
   Visit(loop->body());
   Exit(loop);

@@ -64,15 +64,20 @@ class BreakLocation {
  public:
   // Find the break point at the supplied address, or the closest one before
   // the address.
-  static BreakLocation FromAddress(Handle<DebugInfo> debug_info,
-                                   BreakLocatorType type, Address pc);
+  static BreakLocation FromCodeOffset(Handle<DebugInfo> debug_info, int offset);
 
-  static void FromAddressSameStatement(Handle<DebugInfo> debug_info,
-                                       BreakLocatorType type, Address pc,
-                                       List<BreakLocation>* result_out);
+  static BreakLocation FromFrame(Handle<DebugInfo> debug_info,
+                                 JavaScriptFrame* frame);
 
-  static BreakLocation FromPosition(Handle<DebugInfo> debug_info,
-                                    BreakLocatorType type, int position,
+  static void FromCodeOffsetSameStatement(Handle<DebugInfo> debug_info,
+                                          int offset,
+                                          List<BreakLocation>* result_out);
+
+  static void AllForStatementPosition(Handle<DebugInfo> debug_info,
+                                      int statement_position,
+                                      List<BreakLocation>* result_out);
+
+  static BreakLocation FromPosition(Handle<DebugInfo> debug_info, int position,
                                     BreakPositionAlignment alignment);
 
   bool IsDebugBreak() const;
@@ -84,7 +89,7 @@ class BreakLocation {
     return RelocInfo::IsDebugBreakSlotAtCall(rmode_);
   }
   inline bool HasBreakPoint() const {
-    return debug_info_->HasBreakPoint(pc_offset_);
+    return debug_info_->HasBreakPoint(code_offset_);
   }
 
   Handle<Object> BreakPointObjects() const;
@@ -103,7 +108,7 @@ class BreakLocation {
   inline int position() const { return position_; }
   inline int statement_position() const { return statement_position_; }
 
-  inline Address pc() const { return code()->entry() + pc_offset_; }
+  inline int code_offset() const { return code_offset_; }
 
   inline RelocInfo::Mode rmode() const { return rmode_; }
 
@@ -152,8 +157,7 @@ class BreakLocation {
 
   friend class Debug;
 
-  static int BreakIndexFromAddress(Handle<DebugInfo> debug_info,
-                                   BreakLocatorType type, Address pc);
+  static int BreakIndexFromCodeOffset(Handle<DebugInfo> debug_info, int offset);
 
   void SetDebugBreak();
   void ClearDebugBreak();
@@ -165,8 +169,10 @@ class BreakLocation {
     return RelocInfo::IsDebugBreakSlot(rmode_);
   }
 
+  inline Address pc() const { return code()->entry() + code_offset_; }
+
   Handle<DebugInfo> debug_info_;
-  int pc_offset_;
+  int code_offset_;
   RelocInfo::Mode rmode_;
   intptr_t data_;
   int position_;
@@ -404,21 +410,16 @@ class Debug {
   void ClearAllBreakPoints();
   void FloodWithOneShot(Handle<JSFunction> function,
                         BreakLocatorType type = ALL_BREAK_LOCATIONS);
-  void FloodHandlerWithOneShot();
   void ChangeBreakOnException(ExceptionBreakType type, bool enable);
   bool IsBreakOnException(ExceptionBreakType type);
 
   // Stepping handling.
-  void PrepareStep(StepAction step_action,
-                   int step_count,
-                   StackFrame::Id frame_id);
+  void PrepareStep(StepAction step_action);
   void PrepareStepIn(Handle<JSFunction> function);
+  void PrepareStepOnThrow();
   void ClearStepping();
   void ClearStepOut();
   void EnableStepIn();
-  bool IsStepping() { return thread_local_.step_count_ > 0; }
-  bool StepNextContinue(BreakLocation* location, JavaScriptFrame* frame);
-  bool StepOutActive() { return thread_local_.step_out_fp_ != 0; }
 
   void GetStepinPositions(JavaScriptFrame* frame, StackFrame::Id frame_id,
                           List<int>* results_out);
@@ -439,9 +440,6 @@ class Debug {
   // This function is used in FunctionNameUsing* tests.
   Handle<Object> FindSharedFunctionInfoInScript(Handle<Script> script,
                                                 int position);
-
-  // Returns true if the current stub call is patched to call the debugger.
-  static bool IsDebugBreak(Address addr);
 
   static Handle<Object> GetSourceBreakLocations(
       Handle<SharedFunctionInfo> shared,
@@ -566,7 +564,9 @@ class Debug {
   void ClearOneShot();
   void ActivateStepOut(StackFrame* frame);
   void RemoveDebugInfoAndClearFromShared(Handle<DebugInfo> debug_info);
-  Handle<Object> CheckBreakPoints(Handle<Object> break_point);
+  Handle<Object> CheckBreakPoints(BreakLocation* location,
+                                  bool* has_break_points = nullptr);
+  bool IsMutedAtCurrentLocation(JavaScriptFrame* frame);
   bool CheckBreakPoint(Handle<Object> break_point_object);
   MaybeHandle<Object> CallFunction(const char* name, int argc,
                                    Handle<Object> args[]);
@@ -629,18 +629,11 @@ class Debug {
     // Source statement position from last step next action.
     int last_statement_position_;
 
-    // Number of steps left to perform before debug event.
-    int step_count_;
-
     // Frame pointer from last step next or step frame action.
     Address last_fp_;
 
-    // Number of queued steps left to perform before debug event.
-    int queued_step_count_;
-
-    // Frame pointer for the frame where debugger should be called when current
-    // step out action is completed.
-    Address step_out_fp_;
+    // Frame pointer of the target frame we want to arrive at.
+    Address target_fp_;
 
     // Whether functions are flooded on entry for step-in and step-frame.
     // If we stepped out to the embedder, disable flooding to spill stepping

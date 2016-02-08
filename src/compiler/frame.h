@@ -121,12 +121,12 @@ class Frame : public ZoneObject {
   }
 
   void SetAllocatedRegisters(BitVector* regs) {
-    DCHECK(allocated_registers_ == NULL);
+    DCHECK(allocated_registers_ == nullptr);
     allocated_registers_ = regs;
   }
 
   void SetAllocatedDoubleRegisters(BitVector* regs) {
-    DCHECK(allocated_double_registers_ == NULL);
+    DCHECK(allocated_double_registers_ == nullptr);
     allocated_double_registers_ = regs;
   }
 
@@ -228,7 +228,7 @@ class FrameAccessState : public ZoneObject {
     SetFrameAccessToDefault();
   }
 
-  Frame* const frame() const { return frame_; }
+  Frame* frame() const { return frame_; }
 
   int sp_delta() const { return sp_delta_; }
   void ClearSPDelta() { sp_delta_ = 0; }

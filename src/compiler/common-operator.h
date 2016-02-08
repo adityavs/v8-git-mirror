@@ -14,11 +14,7 @@ namespace internal {
 
 // Forward declarations.
 class ExternalReference;
-template <class>
-class TypeImpl;
-struct ZoneTypeConfig;
-typedef TypeImpl<ZoneTypeConfig> Type;
-
+class Type;
 
 namespace compiler {
 
@@ -51,6 +47,16 @@ std::ostream& operator<<(std::ostream&, BranchHint);
 BranchHint BranchHintOf(const Operator* const);
 
 
+// Deoptimize bailout kind.
+enum class DeoptimizeKind : uint8_t { kEager, kSoft };
+
+size_t hash_value(DeoptimizeKind kind);
+
+std::ostream& operator<<(std::ostream&, DeoptimizeKind);
+
+DeoptimizeKind DeoptimizeKindOf(const Operator* const);
+
+
 // Prediction whether throw-site is surrounded by any local catch-scope.
 enum class IfExceptionHint { kLocallyUncaught, kLocallyCaught };
 
@@ -61,15 +67,15 @@ std::ostream& operator<<(std::ostream&, IfExceptionHint);
 
 class SelectParameters final {
  public:
-  explicit SelectParameters(MachineType type,
+  explicit SelectParameters(MachineRepresentation representation,
                             BranchHint hint = BranchHint::kNone)
-      : type_(type), hint_(hint) {}
+      : representation_(representation), hint_(hint) {}
 
-  MachineType type() const { return type_; }
+  MachineRepresentation representation() const { return representation_; }
   BranchHint hint() const { return hint_; }
 
  private:
-  const MachineType type_;
+  const MachineRepresentation representation_;
   const BranchHint hint_;
 };
 
@@ -84,6 +90,8 @@ SelectParameters const& SelectParametersOf(const Operator* const);
 
 
 size_t ProjectionIndexOf(const Operator* const);
+
+MachineRepresentation PhiRepresentationOf(const Operator* const);
 
 
 // The {IrOpcode::kParameter} opcode represents an incoming parameter to the
@@ -124,7 +132,7 @@ class CommonOperatorBuilder final : public ZoneObject {
   const Operator* IfValue(int32_t value);
   const Operator* IfDefault();
   const Operator* Throw();
-  const Operator* Deoptimize();
+  const Operator* Deoptimize(DeoptimizeKind kind);
   const Operator* Return(int value_input_count = 1);
   const Operator* Terminate();
 
@@ -145,14 +153,16 @@ class CommonOperatorBuilder final : public ZoneObject {
   const Operator* NumberConstant(volatile double);
   const Operator* HeapConstant(const Handle<HeapObject>&);
 
-  const Operator* Select(MachineType, BranchHint = BranchHint::kNone);
-  const Operator* Phi(MachineType type, int value_input_count);
+  const Operator* Select(MachineRepresentation, BranchHint = BranchHint::kNone);
+  const Operator* Phi(MachineRepresentation representation,
+                      int value_input_count);
   const Operator* EffectPhi(int effect_input_count);
   const Operator* EffectSet(int arguments);
   const Operator* Guard(Type* type);
   const Operator* BeginRegion();
   const Operator* FinishRegion();
   const Operator* StateValues(int arguments);
+  const Operator* ObjectState(int pointer_slots, int id);
   const Operator* TypedStateValues(const ZoneVector<MachineType>* types);
   const Operator* FrameState(BailoutId bailout_id,
                              OutputFrameStateCombine state_combine,

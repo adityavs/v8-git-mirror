@@ -181,7 +181,7 @@ void AstNumberingVisitor::VisitThisFunction(ThisFunction* node) {
 void AstNumberingVisitor::VisitSuperPropertyReference(
     SuperPropertyReference* node) {
   IncrementNodeCount();
-  DisableOptimization(kSuperReference);
+  DisableCrankshaft(kSuperReference);
   node->set_base_id(ReserveIdRange(SuperPropertyReference::num_ids()));
   Visit(node->this_var());
   Visit(node->home_object());
@@ -190,7 +190,7 @@ void AstNumberingVisitor::VisitSuperPropertyReference(
 
 void AstNumberingVisitor::VisitSuperCallReference(SuperCallReference* node) {
   IncrementNodeCount();
-  DisableOptimization(kSuperReference);
+  DisableCrankshaft(kSuperReference);
   node->set_base_id(ReserveIdRange(SuperCallReference::num_ids()));
   Visit(node->this_var());
   Visit(node->new_target_var());
@@ -372,11 +372,7 @@ void AstNumberingVisitor::VisitCompareOperation(CompareOperation* node) {
 }
 
 
-void AstNumberingVisitor::VisitSpread(Spread* node) {
-  IncrementNodeCount();
-  DisableCrankshaft(kSpread);
-  Visit(node->expression());
-}
+void AstNumberingVisitor::VisitSpread(Spread* node) { UNREACHABLE(); }
 
 
 void AstNumberingVisitor::VisitEmptyParentheses(EmptyParentheses* node) {
@@ -580,9 +576,15 @@ bool AstNumberingVisitor::Renumber(FunctionLiteral* node) {
     DisableOptimization(kFunctionWithIllegalRedeclaration);
     return Finish(node);
   }
+  if (scope->new_target_var()) DisableCrankshaft(kSuperReference);
   if (scope->calls_eval()) DisableOptimization(kFunctionCallsEval);
   if (scope->arguments() != NULL && !scope->arguments()->IsStackAllocated()) {
     DisableCrankshaft(kContextAllocatedArguments);
+  }
+
+  int rest_index;
+  if (scope->rest_parameter(&rest_index)) {
+    DisableCrankshaft(kRestParameter);
   }
 
   VisitDeclarations(scope->declarations());

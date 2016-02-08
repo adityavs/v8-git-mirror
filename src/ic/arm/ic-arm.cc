@@ -304,13 +304,12 @@ void LoadIC::GenerateMiss(MacroAssembler* masm) {
 
   DCHECK(!AreAliased(r4, r5, LoadWithVectorDescriptor::SlotRegister(),
                      LoadWithVectorDescriptor::VectorRegister()));
-  __ IncrementCounter(isolate->counters()->load_miss(), 1, r4, r5);
+  __ IncrementCounter(isolate->counters()->ic_load_miss(), 1, r4, r5);
 
   LoadIC_PushArgs(masm);
 
   // Perform tail call to the entry.
-  int arg_count = 4;
-  __ TailCallRuntime(Runtime::kLoadIC_Miss, arg_count, 1);
+  __ TailCallRuntime(Runtime::kLoadIC_Miss);
 }
 
 
@@ -323,8 +322,7 @@ void LoadIC::GenerateRuntimeGetProperty(MacroAssembler* masm,
 
   // Do tail-call to runtime routine.
   __ TailCallRuntime(is_strong(language_mode) ? Runtime::kGetPropertyStrong
-                                              : Runtime::kGetProperty,
-                     2, 1);
+                                              : Runtime::kGetProperty);
 }
 
 
@@ -334,13 +332,12 @@ void KeyedLoadIC::GenerateMiss(MacroAssembler* masm) {
 
   DCHECK(!AreAliased(r4, r5, LoadWithVectorDescriptor::SlotRegister(),
                      LoadWithVectorDescriptor::VectorRegister()));
-  __ IncrementCounter(isolate->counters()->keyed_load_miss(), 1, r4, r5);
+  __ IncrementCounter(isolate->counters()->ic_keyed_load_miss(), 1, r4, r5);
 
   LoadIC_PushArgs(masm);
 
   // Perform tail call to the entry.
-  int arg_count = 4;
-  __ TailCallRuntime(Runtime::kKeyedLoadIC_Miss, arg_count, 1);
+  __ TailCallRuntime(Runtime::kKeyedLoadIC_Miss);
 }
 
 
@@ -353,8 +350,7 @@ void KeyedLoadIC::GenerateRuntimeGetProperty(MacroAssembler* masm,
   // Perform tail call to the entry.
   // Do tail-call to runtime routine.
   __ TailCallRuntime(is_strong(language_mode) ? Runtime::kKeyedGetPropertyStrong
-                                              : Runtime::kKeyedGetProperty,
-                     2, 1);
+                                              : Runtime::kKeyedGetProperty);
 }
 
 
@@ -385,7 +381,8 @@ void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm,
 
   GenerateFastArrayLoad(masm, receiver, key, r0, r3, r4, r0, &slow,
                         language_mode);
-  __ IncrementCounter(isolate->counters()->keyed_load_generic_smi(), 1, r4, r3);
+  __ IncrementCounter(isolate->counters()->ic_keyed_load_generic_smi(), 1, r4,
+                      r3);
   __ Ret();
 
   __ bind(&check_number_dictionary);
@@ -404,7 +401,7 @@ void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm,
 
   // Slow case, key and receiver still in r2 and r1.
   __ bind(&slow);
-  __ IncrementCounter(isolate->counters()->keyed_load_generic_slow(), 1, r4,
+  __ IncrementCounter(isolate->counters()->ic_keyed_load_generic_slow(), 1, r4,
                       r3);
   GenerateRuntimeGetProperty(masm, language_mode);
 
@@ -450,8 +447,8 @@ void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm,
   GenerateGlobalInstanceTypeCheck(masm, r0, &slow);
   // Load the property to r0.
   GenerateDictionaryLoad(masm, &slow, r3, key, r0, r5, r4);
-  __ IncrementCounter(isolate->counters()->keyed_load_generic_symbol(), 1, r4,
-                      r3);
+  __ IncrementCounter(isolate->counters()->ic_keyed_load_generic_symbol(), 1,
+                      r4, r3);
   __ Ret();
 
   __ bind(&index_name);
@@ -472,7 +469,7 @@ static void StoreIC_PushArgs(MacroAssembler* masm) {
 void KeyedStoreIC::GenerateMiss(MacroAssembler* masm) {
   StoreIC_PushArgs(masm);
 
-  __ TailCallRuntime(Runtime::kKeyedStoreIC_Miss, 5, 1);
+  __ TailCallRuntime(Runtime::kKeyedStoreIC_Miss);
 }
 
 
@@ -487,8 +484,11 @@ static void KeyedStoreGenerateMegamorphicHelper(
 
   // Fast case: Do the store, could be either Object or double.
   __ bind(fast_object);
-  Register scratch_value = r4;
+  Register scratch = r4;
   Register address = r5;
+  DCHECK(!AreAliased(value, key, receiver, receiver_map, elements_map, elements,
+                     scratch, address));
+
   if (check_map == kCheckMap) {
     __ ldr(elements_map, FieldMemOperand(elements, HeapObject::kMapOffset));
     __ cmp(elements_map,
@@ -501,12 +501,10 @@ static void KeyedStoreGenerateMegamorphicHelper(
   // there may be a callback on the element
   Label holecheck_passed1;
   __ add(address, elements, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
-  __ ldr(scratch_value,
-         MemOperand::PointerAddressFromSmiKey(address, key, PreIndex));
-  __ cmp(scratch_value, Operand(masm->isolate()->factory()->the_hole_value()));
+  __ ldr(scratch, MemOperand::PointerAddressFromSmiKey(address, key, PreIndex));
+  __ cmp(scratch, Operand(masm->isolate()->factory()->the_hole_value()));
   __ b(ne, &holecheck_passed1);
-  __ JumpIfDictionaryInPrototypeChain(receiver, elements_map, scratch_value,
-                                      slow);
+  __ JumpIfDictionaryInPrototypeChain(receiver, elements_map, scratch, slow);
 
   __ bind(&holecheck_passed1);
 
@@ -516,8 +514,8 @@ static void KeyedStoreGenerateMegamorphicHelper(
 
   if (increment_length == kIncrementLength) {
     // Add 1 to receiver->length.
-    __ add(scratch_value, key, Operand(Smi::FromInt(1)));
-    __ str(scratch_value, FieldMemOperand(receiver, JSArray::kLengthOffset));
+    __ add(scratch, key, Operand(Smi::FromInt(1)));
+    __ str(scratch, FieldMemOperand(receiver, JSArray::kLengthOffset));
   }
   // It's irrelevant whether array is smi-only or not when writing a smi.
   __ add(address, elements, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
@@ -526,22 +524,21 @@ static void KeyedStoreGenerateMegamorphicHelper(
 
   __ bind(&non_smi_value);
   // Escape to elements kind transition case.
-  __ CheckFastObjectElements(receiver_map, scratch_value,
-                             &transition_smi_elements);
+  __ CheckFastObjectElements(receiver_map, scratch, &transition_smi_elements);
 
   // Fast elements array, store the value to the elements backing store.
   __ bind(&finish_object_store);
   if (increment_length == kIncrementLength) {
     // Add 1 to receiver->length.
-    __ add(scratch_value, key, Operand(Smi::FromInt(1)));
-    __ str(scratch_value, FieldMemOperand(receiver, JSArray::kLengthOffset));
+    __ add(scratch, key, Operand(Smi::FromInt(1)));
+    __ str(scratch, FieldMemOperand(receiver, JSArray::kLengthOffset));
   }
   __ add(address, elements, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
   __ add(address, address, Operand::PointerOffsetFromSmiKey(key));
   __ str(value, MemOperand(address));
   // Update write barrier for the elements array address.
-  __ mov(scratch_value, value);  // Preserve the value which is returned.
-  __ RecordWrite(elements, address, scratch_value, kLRHasNotBeenSaved,
+  __ mov(scratch, value);  // Preserve the value which is returned.
+  __ RecordWrite(elements, address, scratch, kLRHasNotBeenSaved,
                  kDontSaveFPRegs, EMIT_REMEMBERED_SET, OMIT_SMI_CHECK);
   __ Ret();
 
@@ -559,33 +556,31 @@ static void KeyedStoreGenerateMegamorphicHelper(
   __ add(address, elements,
          Operand((FixedDoubleArray::kHeaderSize + sizeof(kHoleNanLower32)) -
                  kHeapObjectTag));
-  __ ldr(scratch_value,
-         MemOperand(address, key, LSL, kPointerSizeLog2, PreIndex));
-  __ cmp(scratch_value, Operand(kHoleNanUpper32));
+  __ ldr(scratch, MemOperand(address, key, LSL, kPointerSizeLog2, PreIndex));
+  __ cmp(scratch, Operand(kHoleNanUpper32));
   __ b(ne, &fast_double_without_map_check);
-  __ JumpIfDictionaryInPrototypeChain(receiver, elements_map, scratch_value,
-                                      slow);
+  __ JumpIfDictionaryInPrototypeChain(receiver, elements_map, scratch, slow);
 
   __ bind(&fast_double_without_map_check);
-  __ StoreNumberToDoubleElements(value, key, elements, r3, d0,
+  __ StoreNumberToDoubleElements(value, key, elements, scratch, d0,
                                  &transition_double_elements);
   if (increment_length == kIncrementLength) {
     // Add 1 to receiver->length.
-    __ add(scratch_value, key, Operand(Smi::FromInt(1)));
-    __ str(scratch_value, FieldMemOperand(receiver, JSArray::kLengthOffset));
+    __ add(scratch, key, Operand(Smi::FromInt(1)));
+    __ str(scratch, FieldMemOperand(receiver, JSArray::kLengthOffset));
   }
   __ Ret();
 
   __ bind(&transition_smi_elements);
   // Transition the array appropriately depending on the value type.
-  __ ldr(r4, FieldMemOperand(value, HeapObject::kMapOffset));
-  __ CompareRoot(r4, Heap::kHeapNumberMapRootIndex);
+  __ ldr(scratch, FieldMemOperand(value, HeapObject::kMapOffset));
+  __ CompareRoot(scratch, Heap::kHeapNumberMapRootIndex);
   __ b(ne, &non_double_value);
 
   // Value is a double. Transition FAST_SMI_ELEMENTS ->
   // FAST_DOUBLE_ELEMENTS and complete the store.
   __ LoadTransitionedArrayMapConditional(
-      FAST_SMI_ELEMENTS, FAST_DOUBLE_ELEMENTS, receiver_map, r4, slow);
+      FAST_SMI_ELEMENTS, FAST_DOUBLE_ELEMENTS, receiver_map, scratch, slow);
   AllocationSiteMode mode =
       AllocationSite::GetMode(FAST_SMI_ELEMENTS, FAST_DOUBLE_ELEMENTS);
   ElementsTransitionGenerator::GenerateSmiToDouble(masm, receiver, key, value,
@@ -596,7 +591,7 @@ static void KeyedStoreGenerateMegamorphicHelper(
   __ bind(&non_double_value);
   // Value is not a double, FAST_SMI_ELEMENTS -> FAST_ELEMENTS
   __ LoadTransitionedArrayMapConditional(FAST_SMI_ELEMENTS, FAST_ELEMENTS,
-                                         receiver_map, r4, slow);
+                                         receiver_map, scratch, slow);
   mode = AllocationSite::GetMode(FAST_SMI_ELEMENTS, FAST_ELEMENTS);
   ElementsTransitionGenerator::GenerateMapChangeElementsTransition(
       masm, receiver, key, value, receiver_map, mode, slow);
@@ -608,7 +603,7 @@ static void KeyedStoreGenerateMegamorphicHelper(
   // HeapNumber. Make sure that the receiver is a Array with FAST_ELEMENTS and
   // transition array from FAST_DOUBLE_ELEMENTS to FAST_ELEMENTS
   __ LoadTransitionedArrayMapConditional(FAST_DOUBLE_ELEMENTS, FAST_ELEMENTS,
-                                         receiver_map, r4, slow);
+                                         receiver_map, scratch, slow);
   mode = AllocationSite::GetMode(FAST_DOUBLE_ELEMENTS, FAST_ELEMENTS);
   ElementsTransitionGenerator::GenerateDoubleToObject(
       masm, receiver, key, value, receiver_map, mode, slow);
@@ -779,7 +774,7 @@ void StoreIC::GenerateMiss(MacroAssembler* masm) {
   StoreIC_PushArgs(masm);
 
   // Perform tail call to the entry.
-  __ TailCallRuntime(Runtime::kStoreIC_Miss, 5, 1);
+  __ TailCallRuntime(Runtime::kStoreIC_Miss);
 }
 
 
@@ -799,11 +794,11 @@ void StoreIC::GenerateNormal(MacroAssembler* masm) {
 
   GenerateDictionaryStore(masm, &miss, dictionary, name, value, r6, r9);
   Counters* counters = masm->isolate()->counters();
-  __ IncrementCounter(counters->store_normal_hit(), 1, r6, r9);
+  __ IncrementCounter(counters->ic_store_normal_hit(), 1, r6, r9);
   __ Ret();
 
   __ bind(&miss);
-  __ IncrementCounter(counters->store_normal_miss(), 1, r6, r9);
+  __ IncrementCounter(counters->ic_store_normal_miss(), 1, r6, r9);
   GenerateMiss(masm);
 }
 

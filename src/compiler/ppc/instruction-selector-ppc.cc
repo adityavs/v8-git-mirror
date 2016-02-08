@@ -95,6 +95,25 @@ void VisitRRO(InstructionSelector* selector, ArchOpcode opcode, Node* node,
 }
 
 
+#if V8_TARGET_ARCH_PPC64
+void VisitTryTruncateDouble(InstructionSelector* selector, ArchOpcode opcode,
+                            Node* node) {
+  PPCOperandGenerator g(selector);
+  InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
+  InstructionOperand outputs[2];
+  size_t output_count = 0;
+  outputs[output_count++] = g.DefineAsRegister(node);
+
+  Node* success_output = NodeProperties::FindProjection(node, 1);
+  if (success_output) {
+    outputs[output_count++] = g.DefineAsRegister(success_output);
+  }
+
+  selector->Emit(opcode, output_count, outputs, 1, inputs);
+}
+#endif
+
+
 // Shared routine for multiple binary operations.
 template <typename Matcher>
 void VisitBinop(InstructionSelector* selector, Node* node,
@@ -142,32 +161,30 @@ void VisitBinop(InstructionSelector* selector, Node* node, ArchOpcode opcode,
 
 
 void InstructionSelector::VisitLoad(Node* node) {
-  MachineType rep = RepresentationOf(OpParameter<LoadRepresentation>(node));
-  MachineType typ = TypeOf(OpParameter<LoadRepresentation>(node));
+  LoadRepresentation load_rep = LoadRepresentationOf(node->op());
   PPCOperandGenerator g(this);
   Node* base = node->InputAt(0);
   Node* offset = node->InputAt(1);
-
-  ArchOpcode opcode;
+  ArchOpcode opcode = kArchNop;
   ImmediateMode mode = kInt16Imm;
-  switch (rep) {
-    case kRepFloat32:
+  switch (load_rep.representation()) {
+    case MachineRepresentation::kFloat32:
       opcode = kPPC_LoadFloat32;
       break;
-    case kRepFloat64:
+    case MachineRepresentation::kFloat64:
       opcode = kPPC_LoadDouble;
       break;
-    case kRepBit:  // Fall through.
-    case kRepWord8:
-      opcode = (typ == kTypeInt32) ? kPPC_LoadWordS8 : kPPC_LoadWordU8;
+    case MachineRepresentation::kBit:  // Fall through.
+    case MachineRepresentation::kWord8:
+      opcode = load_rep.IsSigned() ? kPPC_LoadWordS8 : kPPC_LoadWordU8;
       break;
-    case kRepWord16:
-      opcode = (typ == kTypeInt32) ? kPPC_LoadWordS16 : kPPC_LoadWordU16;
+    case MachineRepresentation::kWord16:
+      opcode = load_rep.IsSigned() ? kPPC_LoadWordS16 : kPPC_LoadWordU16;
       break;
 #if !V8_TARGET_ARCH_PPC64
-    case kRepTagged:  // Fall through.
+    case MachineRepresentation::kTagged:  // Fall through.
 #endif
-    case kRepWord32:
+    case MachineRepresentation::kWord32:
       opcode = kPPC_LoadWordS32;
 #if V8_TARGET_ARCH_PPC64
       // TODO(mbrandy): this applies to signed loads only (lwa)
@@ -175,13 +192,15 @@ void InstructionSelector::VisitLoad(Node* node) {
 #endif
       break;
 #if V8_TARGET_ARCH_PPC64
-    case kRepTagged:  // Fall through.
-    case kRepWord64:
+    case MachineRepresentation::kTagged:  // Fall through.
+    case MachineRepresentation::kWord64:
       opcode = kPPC_LoadWord64;
       mode = kInt16Imm_4ByteAligned;
       break;
+#else
+    case MachineRepresentation::kWord64:  // Fall through.
 #endif
-    default:
+    case MachineRepresentation::kNone:
       UNREACHABLE();
       return;
   }
@@ -204,13 +223,13 @@ void InstructionSelector::VisitStore(Node* node) {
   Node* offset = node->InputAt(1);
   Node* value = node->InputAt(2);
 
-  StoreRepresentation store_rep = OpParameter<StoreRepresentation>(node);
+  StoreRepresentation store_rep = StoreRepresentationOf(node->op());
   WriteBarrierKind write_barrier_kind = store_rep.write_barrier_kind();
-  MachineType rep = RepresentationOf(store_rep.machine_type());
+  MachineRepresentation rep = store_rep.representation();
 
   // TODO(ppc): I guess this could be done in a better way.
   if (write_barrier_kind != kNoWriteBarrier) {
-    DCHECK_EQ(kRepTagged, rep);
+    DCHECK_EQ(MachineRepresentation::kTagged, rep);
     InstructionOperand inputs[3];
     size_t input_count = 0;
     inputs[input_count++] = g.UseUniqueRegister(base);
@@ -239,36 +258,38 @@ void InstructionSelector::VisitStore(Node* node) {
     code |= MiscField::encode(static_cast<int>(record_write_mode));
     Emit(code, 0, nullptr, input_count, inputs, temp_count, temps);
   } else {
-    ArchOpcode opcode;
+    ArchOpcode opcode = kArchNop;
     ImmediateMode mode = kInt16Imm;
     switch (rep) {
-      case kRepFloat32:
+      case MachineRepresentation::kFloat32:
         opcode = kPPC_StoreFloat32;
         break;
-      case kRepFloat64:
+      case MachineRepresentation::kFloat64:
         opcode = kPPC_StoreDouble;
         break;
-      case kRepBit:  // Fall through.
-      case kRepWord8:
+      case MachineRepresentation::kBit:  // Fall through.
+      case MachineRepresentation::kWord8:
         opcode = kPPC_StoreWord8;
         break;
-      case kRepWord16:
+      case MachineRepresentation::kWord16:
         opcode = kPPC_StoreWord16;
         break;
 #if !V8_TARGET_ARCH_PPC64
-      case kRepTagged:  // Fall through.
+      case MachineRepresentation::kTagged:  // Fall through.
 #endif
-      case kRepWord32:
+      case MachineRepresentation::kWord32:
         opcode = kPPC_StoreWord32;
         break;
 #if V8_TARGET_ARCH_PPC64
-      case kRepTagged:  // Fall through.
-      case kRepWord64:
+      case MachineRepresentation::kTagged:  // Fall through.
+      case MachineRepresentation::kWord64:
         opcode = kPPC_StoreWord64;
         mode = kInt16Imm_4ByteAligned;
         break;
+#else
+      case MachineRepresentation::kWord64:  // Fall through.
 #endif
-      default:
+      case MachineRepresentation::kNone:
         UNREACHABLE();
         return;
     }
@@ -287,33 +308,39 @@ void InstructionSelector::VisitStore(Node* node) {
 
 
 void InstructionSelector::VisitCheckedLoad(Node* node) {
-  MachineType rep = RepresentationOf(OpParameter<MachineType>(node));
-  MachineType typ = TypeOf(OpParameter<MachineType>(node));
+  CheckedLoadRepresentation load_rep = CheckedLoadRepresentationOf(node->op());
   PPCOperandGenerator g(this);
   Node* const base = node->InputAt(0);
   Node* const offset = node->InputAt(1);
   Node* const length = node->InputAt(2);
-  ArchOpcode opcode;
-  switch (rep) {
-    case kRepWord8:
-      opcode = typ == kTypeInt32 ? kCheckedLoadInt8 : kCheckedLoadUint8;
+  ArchOpcode opcode = kArchNop;
+  switch (load_rep.representation()) {
+    case MachineRepresentation::kWord8:
+      opcode = load_rep.IsSigned() ? kCheckedLoadInt8 : kCheckedLoadUint8;
       break;
-    case kRepWord16:
-      opcode = typ == kTypeInt32 ? kCheckedLoadInt16 : kCheckedLoadUint16;
+    case MachineRepresentation::kWord16:
+      opcode = load_rep.IsSigned() ? kCheckedLoadInt16 : kCheckedLoadUint16;
       break;
-    case kRepWord32:
+    case MachineRepresentation::kWord32:
       opcode = kCheckedLoadWord32;
       break;
-    case kRepWord64:
+#if V8_TARGET_ARCH_PPC64
+    case MachineRepresentation::kWord64:
       opcode = kCheckedLoadWord64;
       break;
-    case kRepFloat32:
+#endif
+    case MachineRepresentation::kFloat32:
       opcode = kCheckedLoadFloat32;
       break;
-    case kRepFloat64:
+    case MachineRepresentation::kFloat64:
       opcode = kCheckedLoadFloat64;
       break;
-    default:
+    case MachineRepresentation::kBit:     // Fall through.
+    case MachineRepresentation::kTagged:  // Fall through.
+#if !V8_TARGET_ARCH_PPC64
+    case MachineRepresentation::kWord64:  // Fall through.
+#endif
+    case MachineRepresentation::kNone:
       UNREACHABLE();
       return;
   }
@@ -325,33 +352,40 @@ void InstructionSelector::VisitCheckedLoad(Node* node) {
 
 
 void InstructionSelector::VisitCheckedStore(Node* node) {
-  MachineType rep = RepresentationOf(OpParameter<MachineType>(node));
+  MachineRepresentation rep = CheckedStoreRepresentationOf(node->op());
   PPCOperandGenerator g(this);
   Node* const base = node->InputAt(0);
   Node* const offset = node->InputAt(1);
   Node* const length = node->InputAt(2);
   Node* const value = node->InputAt(3);
-  ArchOpcode opcode;
+  ArchOpcode opcode = kArchNop;
   switch (rep) {
-    case kRepWord8:
+    case MachineRepresentation::kWord8:
       opcode = kCheckedStoreWord8;
       break;
-    case kRepWord16:
+    case MachineRepresentation::kWord16:
       opcode = kCheckedStoreWord16;
       break;
-    case kRepWord32:
+    case MachineRepresentation::kWord32:
       opcode = kCheckedStoreWord32;
       break;
-    case kRepWord64:
+#if V8_TARGET_ARCH_PPC64
+    case MachineRepresentation::kWord64:
       opcode = kCheckedStoreWord64;
       break;
-    case kRepFloat32:
+#endif
+    case MachineRepresentation::kFloat32:
       opcode = kCheckedStoreFloat32;
       break;
-    case kRepFloat64:
+    case MachineRepresentation::kFloat64:
       opcode = kCheckedStoreFloat64;
       break;
-    default:
+    case MachineRepresentation::kBit:     // Fall through.
+    case MachineRepresentation::kTagged:  // Fall through.
+#if !V8_TARGET_ARCH_PPC64
+    case MachineRepresentation::kWord64:  // Fall through.
+#endif
+    case MachineRepresentation::kNone:
       UNREACHABLE();
       return;
   }
@@ -906,6 +940,16 @@ void InstructionSelector::VisitChangeFloat32ToFloat64(Node* node) {
 }
 
 
+void InstructionSelector::VisitRoundInt32ToFloat32(Node* node) {
+  VisitRR(this, kPPC_Int32ToFloat32, node);
+}
+
+
+void InstructionSelector::VisitRoundUint32ToFloat32(Node* node) {
+  UNIMPLEMENTED();
+}
+
+
 void InstructionSelector::VisitChangeInt32ToFloat64(Node* node) {
   VisitRR(this, kPPC_Int32ToDouble, node);
 }
@@ -927,27 +971,23 @@ void InstructionSelector::VisitChangeFloat64ToUint32(Node* node) {
 
 
 #if V8_TARGET_ARCH_PPC64
-void InstructionSelector::VisitTruncateFloat32ToInt64(Node* node) {
-  VisitRR(this, kPPC_DoubleToInt64, node);
+void InstructionSelector::VisitTryTruncateFloat32ToInt64(Node* node) {
+  VisitTryTruncateDouble(this, kPPC_DoubleToInt64, node);
 }
 
 
 void InstructionSelector::VisitTryTruncateFloat64ToInt64(Node* node) {
-  if (NodeProperties::FindProjection(node, 1)) {
-    // TODO(ppc): implement the second return value.
-    UNIMPLEMENTED();
-  }
-  VisitRR(this, kPPC_DoubleToInt64, node);
+  VisitTryTruncateDouble(this, kPPC_DoubleToInt64, node);
 }
 
 
-void InstructionSelector::VisitTruncateFloat32ToUint64(Node* node) {
-  VisitRR(this, kPPC_DoubleToUint64, node);
+void InstructionSelector::VisitTryTruncateFloat32ToUint64(Node* node) {
+  VisitTryTruncateDouble(this, kPPC_DoubleToUint64, node);
 }
 
 
-void InstructionSelector::VisitTruncateFloat64ToUint64(Node* node) {
-  VisitRR(this, kPPC_DoubleToUint64, node);
+void InstructionSelector::VisitTryTruncateFloat64ToUint64(Node* node) {
+  VisitTryTruncateDouble(this, kPPC_DoubleToUint64, node);
 }
 
 
@@ -977,6 +1017,16 @@ void InstructionSelector::VisitTruncateFloat64ToInt32(Node* node) {
       return VisitRR(this, kPPC_DoubleToInt32, node);
   }
   UNREACHABLE();
+}
+
+
+void InstructionSelector::VisitTruncateFloat32ToInt32(Node* node) {
+  return VisitRR(this, kPPC_DoubleToInt32, node);
+}
+
+
+void InstructionSelector::VisitTruncateFloat32ToUint32(Node* node) {
+  UNIMPLEMENTED();
 }
 
 
@@ -1211,6 +1261,30 @@ void InstructionSelector::VisitInt32SubWithOverflow(Node* node) {
 }
 
 
+#if V8_TARGET_ARCH_PPC64
+void InstructionSelector::VisitInt64AddWithOverflow(Node* node) {
+  if (Node* ovf = NodeProperties::FindProjection(node, 1)) {
+    FlagsContinuation cont(kOverflow, ovf);
+    return VisitBinop<Int64BinopMatcher>(this, node, kPPC_Add, kInt16Imm,
+                                         &cont);
+  }
+  FlagsContinuation cont;
+  VisitBinop<Int64BinopMatcher>(this, node, kPPC_Add, kInt16Imm, &cont);
+}
+
+
+void InstructionSelector::VisitInt64SubWithOverflow(Node* node) {
+  if (Node* ovf = NodeProperties::FindProjection(node, 1)) {
+    FlagsContinuation cont(kOverflow, ovf);
+    return VisitBinop<Int64BinopMatcher>(this, node, kPPC_Sub, kInt16Imm_Negate,
+                                         &cont);
+  }
+  FlagsContinuation cont;
+  VisitBinop<Int64BinopMatcher>(this, node, kPPC_Sub, kInt16Imm_Negate, &cont);
+}
+#endif
+
+
 static bool CompareLogical(FlagsContinuation* cont) {
   switch (cont->condition()) {
     case kUnsignedLessThan:
@@ -1377,12 +1451,12 @@ void VisitWordCompareZero(InstructionSelector* selector, Node* user,
         if (ProjectionIndexOf(value->op()) == 1u) {
           // We cannot combine the <Operation>WithOverflow with this branch
           // unless the 0th projection (the use of the actual value of the
-          // <Operation> is either NULL, which means there's no use of the
+          // <Operation> is either nullptr, which means there's no use of the
           // actual value, or was already defined, which means it is scheduled
           // *AFTER* this branch).
           Node* const node = value->InputAt(0);
           Node* const result = NodeProperties::FindProjection(node, 0);
-          if (result == NULL || selector->IsDefined(result)) {
+          if (result == nullptr || selector->IsDefined(result)) {
             switch (node->opcode()) {
               case IrOpcode::kInt32AddWithOverflow:
                 cont->OverwriteAndNegateIfEqual(kOverflow);
@@ -1393,6 +1467,16 @@ void VisitWordCompareZero(InstructionSelector* selector, Node* user,
                 return VisitBinop<Int32BinopMatcher>(selector, node,
                                                      kPPC_SubWithOverflow32,
                                                      kInt16Imm_Negate, cont);
+#if V8_TARGET_ARCH_PPC64
+              case IrOpcode::kInt64AddWithOverflow:
+                cont->OverwriteAndNegateIfEqual(kOverflow);
+                return VisitBinop<Int64BinopMatcher>(selector, node, kPPC_Add,
+                                                     kInt16Imm, cont);
+              case IrOpcode::kInt64SubWithOverflow:
+                cont->OverwriteAndNegateIfEqual(kOverflow);
+                return VisitBinop<Int64BinopMatcher>(selector, node, kPPC_Sub,
+                                                     kInt16Imm_Negate, cont);
+#endif
               default:
                 break;
             }
@@ -1599,9 +1683,9 @@ void InstructionSelector::VisitFloat64LessThanOrEqual(Node* node) {
 }
 
 
-void InstructionSelector::EmitPrepareArguments(NodeVector* arguments,
-                                               const CallDescriptor* descriptor,
-                                               Node* node) {
+void InstructionSelector::EmitPrepareArguments(
+    ZoneVector<PushParameter>* arguments, const CallDescriptor* descriptor,
+    Node* node) {
   PPCOperandGenerator g(this);
 
   // Prepare for C function call.
@@ -1612,8 +1696,8 @@ void InstructionSelector::EmitPrepareArguments(NodeVector* arguments,
 
     // Poke any stack arguments.
     int slot = kStackFrameExtraParamSlot;
-    for (Node* node : (*arguments)) {
-      Emit(kPPC_StoreToStackSlot, g.NoOutput(), g.UseRegister(node),
+    for (PushParameter input : (*arguments)) {
+      Emit(kPPC_StoreToStackSlot, g.NoOutput(), g.UseRegister(input.node()),
            g.TempImmediate(slot));
       ++slot;
     }
@@ -1621,15 +1705,15 @@ void InstructionSelector::EmitPrepareArguments(NodeVector* arguments,
     // Push any stack arguments.
     int num_slots = static_cast<int>(descriptor->StackParameterCount());
     int slot = 0;
-    for (Node* input : (*arguments)) {
+    for (PushParameter input : (*arguments)) {
       if (slot == 0) {
-        DCHECK(input);
-        Emit(kPPC_PushFrame, g.NoOutput(), g.UseRegister(input),
+        DCHECK(input.node());
+        Emit(kPPC_PushFrame, g.NoOutput(), g.UseRegister(input.node()),
              g.TempImmediate(num_slots));
       } else {
         // Skip any alignment holes in pushed nodes.
-        if (input) {
-          Emit(kPPC_StoreToStackSlot, g.NoOutput(), g.UseRegister(input),
+        if (input.node()) {
+          Emit(kPPC_StoreToStackSlot, g.NoOutput(), g.UseRegister(input.node()),
                g.TempImmediate(slot));
         }
       }

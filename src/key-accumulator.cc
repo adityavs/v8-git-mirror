@@ -29,6 +29,9 @@ Handle<FixedArray> KeyAccumulator::GetKeys(GetKeysConversion convert) {
   // Make sure we have all the lengths collected.
   NextPrototype();
 
+  if (type_ == OWN_ONLY && !ownProxyKeys_.is_null()) {
+    return ownProxyKeys_;
+  }
   // Assemble the result array by first adding the element keys and then the
   // property keys. We use the total number of String + Symbol keys per level in
   // |level_lengths_| and the available element keys in the corresponding bucket
@@ -231,18 +234,13 @@ MaybeHandle<FixedArray> FilterProxyKeys(Isolate* isolate, Handle<JSProxy> owner,
   int store_position = 0;
   for (int i = 0; i < keys->length(); ++i) {
     Handle<Name> key(Name::cast(keys->get(i)), isolate);
-    if (key->IsSymbol()) {
-      if ((filter & SKIP_SYMBOLS) || Handle<Symbol>::cast(key)->is_private()) {
-        continue;  // Skip this key.
-      }
-    }
-    if (filter & SKIP_STRINGS) continue;  // Skip this key.
+    if (key->FilterKey(filter)) continue;  // Skip this key.
     if (filter & ONLY_ENUMERABLE) {
       PropertyDescriptor desc;
-      bool found =
+      Maybe<bool> found =
           JSProxy::GetOwnPropertyDescriptor(isolate, owner, key, &desc);
-      if (isolate->has_pending_exception()) return MaybeHandle<FixedArray>();
-      if (!found || !desc.enumerable()) continue;  // Skip this key.
+      MAYBE_RETURN(found, MaybeHandle<FixedArray>());
+      if (!found.FromJust() || !desc.enumerable()) continue;  // Skip this key.
     }
     // Keep this key.
     if (store_position != i) {
@@ -256,20 +254,27 @@ MaybeHandle<FixedArray> FilterProxyKeys(Isolate* isolate, Handle<JSProxy> owner,
 }
 
 
-// Returns "false" in case of exception, "true" on success.
-bool KeyAccumulator::AddKeysFromProxy(Handle<JSProxy> proxy,
-                                      Handle<FixedArray> keys) {
+// Returns "nothing" in case of exception, "true" on success.
+Maybe<bool> KeyAccumulator::AddKeysFromProxy(Handle<JSProxy> proxy,
+                                             Handle<FixedArray> keys) {
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-      isolate_, keys, FilterProxyKeys(isolate_, proxy, keys, filter_), false);
+      isolate_, keys, FilterProxyKeys(isolate_, proxy, keys, filter_),
+      Nothing<bool>());
   // Proxies define a complete list of keys with no distinction of
   // elements and properties, which breaks the normal assumption for the
   // KeyAccumulator.
-  AddKeys(keys, PROXY_MAGIC);
+  if (type_ == OWN_ONLY) {
+    ownProxyKeys_ = keys;
+    level_string_length_ = keys->length();
+    length_ = level_string_length_;
+  } else {
+    AddKeys(keys, PROXY_MAGIC);
+  }
   // Invert the current length to indicate a present proxy, so we can ignore
   // element keys for this level. Otherwise we would not fully respect the order
   // given by the proxy.
   level_string_length_ = -level_string_length_;
-  return true;
+  return Just(true);
 }
 
 

@@ -57,6 +57,18 @@ test(function() {
   Object.defineProperty(1, "x", {});
 }, "Object.defineProperty called on non-object", TypeError);
 
+test(function() {
+  (function() {}).apply({}, 1);
+}, "CreateListFromArrayLike called on non-object", TypeError);
+
+test(function() {
+  Reflect.apply(function() {}, {}, 1);
+}, "CreateListFromArrayLike called on non-object", TypeError);
+
+test(function() {
+  Reflect.construct(function() {}, 1);
+}, "CreateListFromArrayLike called on non-object", TypeError);
+
 // kCalledOnNullOrUndefined
 test(function() {
   Array.prototype.shift.call(null);
@@ -96,11 +108,6 @@ test(function() {
 test(function() {
   new DataView(1);
 }, "First argument to DataView constructor must be an ArrayBuffer", TypeError);
-
-// kDateType
-test(function() {
-  Date.prototype.setYear.call({}, 1);
-}, "this is not a Date object.", TypeError);
 
 // kDefineDisallowed
 test(function() {
@@ -170,11 +177,6 @@ test(function() {
   new Map([1]);
 }, "Iterator value 1 is not an entry object", TypeError);
 
-// kNotAPromise
-test(function() {
-  Promise.prototype.chain.call(1);
-}, "1 is not a promise", TypeError);
-
 // kNotConstructor
 test(function() {
   new Symbol();
@@ -182,7 +184,7 @@ test(function() {
 
 // kNotDateObject
 test(function() {
-  Date.prototype.setHours.call(1);
+  Date.prototype.getHours.call(1);
 }, "this is not a Date object.", TypeError);
 
 // kNotGeneric
@@ -334,19 +336,6 @@ test(function() {
   Object.defineProperty({}, "x", { get: function(){}, value: 1});
 }, "Invalid property descriptor. Cannot both specify accessors " +
    "and a value or writable attribute, #<Object>", TypeError);
-
-// kWrongArgs
-test(function() {
-  (function() {}).apply({}, 1);
-}, "Function.prototype.apply: Arguments list has wrong type", TypeError);
-
-test(function() {
-  Reflect.apply(function() {}, {}, 1);
-}, "Reflect.apply: Arguments list has wrong type", TypeError);
-
-test(function() {
-  Reflect.construct(function() {}, 1);
-}, "Reflect.construct: Arguments list has wrong type", TypeError);
 
 
 // === SyntaxError ===

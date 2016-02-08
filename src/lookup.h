@@ -48,7 +48,6 @@ class LookupIterator final BASE_EMBEDDED {
                  Configuration configuration = DEFAULT)
       : configuration_(ComputeConfiguration(configuration, name)),
         state_(NOT_FOUND),
-        exotic_index_state_(ExoticIndexState::kUninitialized),
         interceptor_state_(InterceptorState::kUninitialized),
         property_details_(PropertyDetails::Empty()),
         isolate_(name->GetIsolate()),
@@ -72,7 +71,6 @@ class LookupIterator final BASE_EMBEDDED {
                  Configuration configuration = DEFAULT)
       : configuration_(ComputeConfiguration(configuration, name)),
         state_(NOT_FOUND),
-        exotic_index_state_(ExoticIndexState::kUninitialized),
         interceptor_state_(InterceptorState::kUninitialized),
         property_details_(PropertyDetails::Empty()),
         isolate_(name->GetIsolate()),
@@ -95,7 +93,6 @@ class LookupIterator final BASE_EMBEDDED {
                  Configuration configuration = DEFAULT)
       : configuration_(configuration),
         state_(NOT_FOUND),
-        exotic_index_state_(ExoticIndexState::kUninitialized),
         interceptor_state_(InterceptorState::kUninitialized),
         property_details_(PropertyDetails::Empty()),
         isolate_(isolate),
@@ -116,7 +113,6 @@ class LookupIterator final BASE_EMBEDDED {
                  Configuration configuration = DEFAULT)
       : configuration_(configuration),
         state_(NOT_FOUND),
-        exotic_index_state_(ExoticIndexState::kUninitialized),
         interceptor_state_(InterceptorState::kUninitialized),
         property_details_(PropertyDetails::Empty()),
         isolate_(isolate),
@@ -237,13 +233,16 @@ class LookupIterator final BASE_EMBEDDED {
     DCHECK(has_property_);
     return property_details_;
   }
+  PropertyAttributes property_attributes() const {
+    return property_details().attributes();
+  }
   bool IsConfigurable() const { return property_details().IsConfigurable(); }
   bool IsReadOnly() const { return property_details().IsReadOnly(); }
   Representation representation() const {
     return property_details().representation();
   }
   FieldIndex GetFieldIndex() const;
-  Handle<HeapType> GetFieldType() const;
+  Handle<FieldType> GetFieldType() const;
   int GetAccessorIndex() const;
   int GetConstantIndex() const;
   Handle<PropertyCell> GetPropertyCell() const;
@@ -277,7 +276,6 @@ class LookupIterator final BASE_EMBEDDED {
   void ReloadPropertyInformation();
   inline bool SkipInterceptor(JSObject* holder);
   bool HasInterceptor(Map* map) const;
-  bool InternalHolderIsReceiverOrHiddenPrototype() const;
   inline InterceptorInfo* GetInterceptor(JSObject* holder) const {
     if (IsElement()) return holder->GetIndexedInterceptor();
     return holder->GetNamedInterceptor();
@@ -317,15 +315,13 @@ class LookupIterator final BASE_EMBEDDED {
     return GetRootForNonJSReceiver(isolate, receiver, index);
   }
 
-  enum class ExoticIndexState { kUninitialized, kNotExotic, kExotic };
-  inline bool IsIntegerIndexedExotic(JSReceiver* holder);
+  State NotFound(JSReceiver* const holder) const;
 
   // If configuration_ becomes mutable, update
   // HolderIsReceiverOrHiddenPrototype.
   const Configuration configuration_;
   State state_;
   bool has_property_;
-  ExoticIndexState exotic_index_state_;
   InterceptorState interceptor_state_;
   PropertyDetails property_details_;
   Isolate* const isolate_;

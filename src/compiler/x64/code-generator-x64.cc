@@ -692,12 +692,15 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       AssembleArchTableSwitch(instr);
       break;
     case kArchNop:
+    case kArchThrowTerminator:
       // don't emit code for nops.
       break;
     case kArchDeoptimize: {
       int deopt_state_id =
           BuildTranslation(instr, -1, 0, OutputFrameStateCombine::Ignore());
-      AssembleDeoptimizerCall(deopt_state_id, Deoptimizer::EAGER);
+      Deoptimizer::BailoutType bailout_type =
+          Deoptimizer::BailoutType(MiscField::decode(instr->opcode()));
+      AssembleDeoptimizerCall(deopt_state_id, bailout_type);
       break;
     }
     case kArchRet:
@@ -735,6 +738,18 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
                        MemoryChunk::kPointersFromHereAreInterestingMask,
                        not_zero, ool->entry());
       __ bind(ool->exit());
+      break;
+    }
+    case kArchStackSlot: {
+      FrameOffset offset =
+          frame_access_state()->GetFrameOffset(i.InputInt32(0));
+      Register base;
+      if (offset.from_stack_pointer()) {
+        base = rsp;
+      } else {
+        base = rbp;
+      }
+      __ leaq(i.OutputRegister(), Operand(base, offset.offset()));
       break;
     }
     case kX64Add32:
@@ -944,6 +959,22 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       __ Roundss(i.OutputDoubleRegister(), i.InputDoubleRegister(0), mode);
       break;
     }
+    case kSSEFloat32ToInt32:
+      if (instr->InputAt(0)->IsDoubleRegister()) {
+        __ Cvttss2si(i.OutputRegister(), i.InputDoubleRegister(0));
+      } else {
+        __ Cvttss2si(i.OutputRegister(), i.InputOperand(0));
+      }
+      break;
+    case kSSEFloat32ToUint32: {
+      if (instr->InputAt(0)->IsDoubleRegister()) {
+        __ Cvttss2siq(i.OutputRegister(), i.InputDoubleRegister(0));
+      } else {
+        __ Cvttss2siq(i.OutputRegister(), i.InputOperand(0));
+      }
+      __ AssertZeroExtended(i.OutputRegister());
+      break;
+    }
     case kSSEFloat64Cmp:
       ASSEMBLE_SSE_BINOP(Ucomisd);
       break;
@@ -1049,6 +1080,28 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       } else {
         __ Cvttss2siq(i.OutputRegister(), i.InputOperand(0));
       }
+      if (instr->OutputCount() > 1) {
+        __ Set(i.OutputRegister(1), 1);
+        Label done;
+        Label fail;
+        __ Move(kScratchDoubleReg, static_cast<float>(INT64_MIN));
+        if (instr->InputAt(0)->IsDoubleRegister()) {
+          __ Ucomiss(kScratchDoubleReg, i.InputDoubleRegister(0));
+        } else {
+          __ Ucomiss(kScratchDoubleReg, i.InputOperand(0));
+        }
+        // If the input is NaN, then the conversion fails.
+        __ j(parity_even, &fail);
+        // If the input is INT64_MIN, then the conversion succeeds.
+        __ j(equal, &done);
+        __ cmpq(i.OutputRegister(0), Immediate(1));
+        // If the conversion results in INT64_MIN, but the input was not
+        // INT64_MIN, then the conversion fails.
+        __ j(no_overflow, &done);
+        __ bind(&fail);
+        __ Set(i.OutputRegister(1), 0);
+        __ bind(&done);
+      }
       break;
     case kSSEFloat64ToInt64:
       if (instr->InputAt(0)->IsDoubleRegister()) {
@@ -1057,11 +1110,34 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
         __ Cvttsd2siq(i.OutputRegister(0), i.InputOperand(0));
       }
       if (instr->OutputCount() > 1) {
-        __ Set(i.OutputRegister(1), 0x8000000000000000);
-        __ subq(i.OutputRegister(1), i.OutputRegister(0));
+        __ Set(i.OutputRegister(1), 1);
+        Label done;
+        Label fail;
+        __ Move(kScratchDoubleReg, static_cast<double>(INT64_MIN));
+        if (instr->InputAt(0)->IsDoubleRegister()) {
+          __ Ucomisd(kScratchDoubleReg, i.InputDoubleRegister(0));
+        } else {
+          __ Ucomisd(kScratchDoubleReg, i.InputOperand(0));
+        }
+        // If the input is NaN, then the conversion fails.
+        __ j(parity_even, &fail);
+        // If the input is INT64_MIN, then the conversion succeeds.
+        __ j(equal, &done);
+        __ cmpq(i.OutputRegister(0), Immediate(1));
+        // If the conversion results in INT64_MIN, but the input was not
+        // INT64_MIN, then the conversion fails.
+        __ j(no_overflow, &done);
+        __ bind(&fail);
+        __ Set(i.OutputRegister(1), 0);
+        __ bind(&done);
       }
       break;
     case kSSEFloat32ToUint64: {
+      Label done;
+      Label success;
+      if (instr->OutputCount() > 1) {
+        __ Set(i.OutputRegister(1), 0);
+      }
       // There does not exist a Float32ToUint64 instruction, so we have to use
       // the Float32ToInt64 instruction.
       if (instr->InputAt(0)->IsDoubleRegister()) {
@@ -1072,8 +1148,7 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       // Check if the result of the Float32ToInt64 conversion is positive, we
       // are already done.
       __ testq(i.OutputRegister(), i.OutputRegister());
-      Label done;
-      __ j(positive, &done);
+      __ j(positive, &success);
       // The result of the first conversion was negative, which means that the
       // input value was not within the positive int64 range. We subtract 2^64
       // and convert it again to see if it is within the uint64 range.
@@ -1093,10 +1168,19 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       // earlier.
       __ Set(kScratchRegister, 0x8000000000000000);
       __ orq(i.OutputRegister(), kScratchRegister);
+      __ bind(&success);
+      if (instr->OutputCount() > 1) {
+        __ Set(i.OutputRegister(1), 1);
+      }
       __ bind(&done);
       break;
     }
     case kSSEFloat64ToUint64: {
+      Label done;
+      Label success;
+      if (instr->OutputCount() > 1) {
+        __ Set(i.OutputRegister(1), 0);
+      }
       // There does not exist a Float64ToUint64 instruction, so we have to use
       // the Float64ToInt64 instruction.
       if (instr->InputAt(0)->IsDoubleRegister()) {
@@ -1107,8 +1191,7 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       // Check if the result of the Float64ToInt64 conversion is positive, we
       // are already done.
       __ testq(i.OutputRegister(), i.OutputRegister());
-      Label done;
-      __ j(positive, &done);
+      __ j(positive, &success);
       // The result of the first conversion was negative, which means that the
       // input value was not within the positive int64 range. We subtract 2^64
       // and convert it again to see if it is within the uint64 range.
@@ -1126,9 +1209,12 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       // The input value is within uint64 range and the second conversion worked
       // successfully, but we still have to undo the subtraction we did
       // earlier.
-      __ movq(kScratchRegister, Immediate(1));
-      __ shlq(kScratchRegister, Immediate(63));
+      __ Set(kScratchRegister, 0x8000000000000000);
       __ orq(i.OutputRegister(), kScratchRegister);
+      __ bind(&success);
+      if (instr->OutputCount() > 1) {
+        __ Set(i.OutputRegister(1), 1);
+      }
       __ bind(&done);
       break;
     }
@@ -1137,6 +1223,13 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
         __ Cvtlsi2sd(i.OutputDoubleRegister(), i.InputRegister(0));
       } else {
         __ Cvtlsi2sd(i.OutputDoubleRegister(), i.InputOperand(0));
+      }
+      break;
+    case kSSEInt32ToFloat32:
+      if (instr->InputAt(0)->IsRegister()) {
+        __ Cvtlsi2ss(i.OutputDoubleRegister(), i.InputRegister(0));
+      } else {
+        __ Cvtlsi2ss(i.OutputDoubleRegister(), i.InputOperand(0));
       }
       break;
     case kSSEInt64ToFloat32:
@@ -1178,6 +1271,14 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
         __ movl(kScratchRegister, i.InputOperand(0));
       }
       __ Cvtqsi2sd(i.OutputDoubleRegister(), kScratchRegister);
+      break;
+    case kSSEUint32ToFloat32:
+      if (instr->InputAt(0)->IsRegister()) {
+        __ movl(kScratchRegister, i.InputRegister(0));
+      } else {
+        __ movl(kScratchRegister, i.InputOperand(0));
+      }
+      __ Cvtqsi2ss(i.OutputDoubleRegister(), kScratchRegister);
       break;
     case kSSEFloat64ExtractLowWord32:
       if (instr->InputAt(0)->IsDoubleStackSlot()) {
@@ -1751,8 +1852,7 @@ void CodeGenerator::AssemblePrologue() {
     __ pushq(rbp);
     __ movq(rbp, rsp);
   } else if (descriptor->IsJSFunctionCall()) {
-    CompilationInfo* info = this->info();
-    __ Prologue(info->IsCodePreAgingActive());
+    __ Prologue(this->info()->GeneratePreagedPrologue());
   } else if (frame()->needs_frame()) {
     __ StubPrologue();
   } else {
@@ -1863,7 +1963,7 @@ void CodeGenerator::AssembleReturn() {
 
 void CodeGenerator::AssembleMove(InstructionOperand* source,
                                  InstructionOperand* destination) {
-  X64OperandConverter g(this, NULL);
+  X64OperandConverter g(this, nullptr);
   // Dispatch on the source and destination operand kinds.  Not all
   // combinations are possible.
   if (source->IsRegister()) {
@@ -1984,16 +2084,25 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
 
 void CodeGenerator::AssembleSwap(InstructionOperand* source,
                                  InstructionOperand* destination) {
-  X64OperandConverter g(this, NULL);
+  X64OperandConverter g(this, nullptr);
   // Dispatch on the source and destination operand kinds.  Not all
   // combinations are possible.
   if (source->IsRegister() && destination->IsRegister()) {
     // Register-register.
-    __ xchgq(g.ToRegister(source), g.ToRegister(destination));
+    Register src = g.ToRegister(source);
+    Register dst = g.ToRegister(destination);
+    __ movq(kScratchRegister, src);
+    __ movq(src, dst);
+    __ movq(dst, kScratchRegister);
   } else if (source->IsRegister() && destination->IsStackSlot()) {
     Register src = g.ToRegister(source);
+    __ pushq(src);
+    frame_access_state()->IncreaseSPDelta(1);
     Operand dst = g.ToOperand(destination);
-    __ xchgq(src, dst);
+    __ movq(src, dst);
+    frame_access_state()->IncreaseSPDelta(-1);
+    dst = g.ToOperand(destination);
+    __ popq(dst);
   } else if ((source->IsStackSlot() && destination->IsStackSlot()) ||
              (source->IsDoubleStackSlot() &&
               destination->IsDoubleStackSlot())) {
@@ -2002,8 +2111,13 @@ void CodeGenerator::AssembleSwap(InstructionOperand* source,
     Operand src = g.ToOperand(source);
     Operand dst = g.ToOperand(destination);
     __ movq(tmp, dst);
-    __ xchgq(tmp, src);
-    __ movq(dst, tmp);
+    __ pushq(src);
+    frame_access_state()->IncreaseSPDelta(1);
+    src = g.ToOperand(source);
+    __ movq(src, tmp);
+    frame_access_state()->IncreaseSPDelta(-1);
+    dst = g.ToOperand(destination);
+    __ popq(dst);
   } else if (source->IsDoubleRegister() && destination->IsDoubleRegister()) {
     // XMM register-register swap. We rely on having xmm0
     // available as a fixed scratch register.

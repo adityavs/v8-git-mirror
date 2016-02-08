@@ -118,7 +118,7 @@ class MipsOperandConverter final : public InstructionOperandConverter {
   MemOperand MemoryOperand(size_t index = 0) { return MemoryOperand(&index); }
 
   MemOperand ToMemOperand(InstructionOperand* op) const {
-    DCHECK(op != NULL);
+    DCHECK_NOT_NULL(op);
     DCHECK(op->IsStackSlot() || op->IsDoubleStackSlot());
     FrameOffset offset = frame_access_state()->GetFrameOffset(
         AllocatedOperand::cast(op)->index());
@@ -409,8 +409,14 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool& predicate,
   } while (0)
 
 
-#define ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(asm_instr)                             \
-  do {                                                                         \
+#define ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(mode)                                  \
+  if (IsMipsArchVariant(kMips32r6)) {                                          \
+    __ cfc1(kScratchReg, FCSR);                                                \
+    __ li(at, Operand(mode_##mode));                                           \
+    __ ctc1(at, FCSR);                                                         \
+    __ rint_d(i.OutputDoubleRegister(), i.InputDoubleRegister(0));             \
+    __ ctc1(kScratchReg, FCSR);                                                \
+  } else {                                                                     \
     auto ool = new (zone()) OutOfLineRound(this, i.OutputDoubleRegister());    \
     Label done;                                                                \
     __ Mfhc1(kScratchReg, i.InputDoubleRegister(0));                           \
@@ -419,18 +425,24 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool& predicate,
     __ Branch(USE_DELAY_SLOT, &done, hs, at,                                   \
               Operand(HeapNumber::kExponentBias + HeapNumber::kMantissaBits)); \
     __ mov_d(i.OutputDoubleRegister(), i.InputDoubleRegister(0));              \
-    __ asm_instr(i.OutputDoubleRegister(), i.InputDoubleRegister(0));          \
+    __ mode##_l_d(i.OutputDoubleRegister(), i.InputDoubleRegister(0));         \
     __ Move(at, kScratchReg2, i.OutputDoubleRegister());                       \
     __ or_(at, at, kScratchReg2);                                              \
     __ Branch(USE_DELAY_SLOT, ool->entry(), eq, at, Operand(zero_reg));        \
     __ cvt_d_l(i.OutputDoubleRegister(), i.OutputDoubleRegister());            \
     __ bind(ool->exit());                                                      \
     __ bind(&done);                                                            \
-  } while (0)
+  }
 
 
-#define ASSEMBLE_ROUND_FLOAT_TO_FLOAT(asm_instr)                              \
-  do {                                                                        \
+#define ASSEMBLE_ROUND_FLOAT_TO_FLOAT(mode)                                   \
+  if (IsMipsArchVariant(kMips32r6)) {                                         \
+    __ cfc1(kScratchReg, FCSR);                                               \
+    __ li(at, Operand(mode_##mode));                                          \
+    __ ctc1(at, FCSR);                                                        \
+    __ rint_s(i.OutputDoubleRegister(), i.InputDoubleRegister(0));            \
+    __ ctc1(kScratchReg, FCSR);                                               \
+  } else {                                                                    \
     int32_t kFloat32ExponentBias = 127;                                       \
     int32_t kFloat32MantissaBits = 23;                                        \
     int32_t kFloat32ExponentBits = 8;                                         \
@@ -441,13 +453,13 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool& predicate,
     __ Branch(USE_DELAY_SLOT, &done, hs, at,                                  \
               Operand(kFloat32ExponentBias + kFloat32MantissaBits));          \
     __ mov_s(i.OutputDoubleRegister(), i.InputDoubleRegister(0));             \
-    __ asm_instr(i.OutputDoubleRegister(), i.InputDoubleRegister(0));         \
+    __ mode##_w_s(i.OutputDoubleRegister(), i.InputDoubleRegister(0));        \
     __ mfc1(at, i.OutputDoubleRegister());                                    \
     __ Branch(USE_DELAY_SLOT, ool->entry(), eq, at, Operand(zero_reg));       \
     __ cvt_s_w(i.OutputDoubleRegister(), i.OutputDoubleRegister());           \
     __ bind(ool->exit());                                                     \
     __ bind(&done);                                                           \
-  } while (0)
+  }
 
 void CodeGenerator::AssembleDeconstructActivationRecord(int stack_param_delta) {
   int sp_slot_delta = TailCallFrameStackSlotDelta(stack_param_delta);
@@ -572,12 +584,15 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       AssembleArchTableSwitch(instr);
       break;
     case kArchNop:
+    case kArchThrowTerminator:
       // don't emit code for nops.
       break;
     case kArchDeoptimize: {
       int deopt_state_id =
           BuildTranslation(instr, -1, 0, OutputFrameStateCombine::Ignore());
-      AssembleDeoptimizerCall(deopt_state_id, Deoptimizer::EAGER);
+      Deoptimizer::BailoutType bailout_type =
+          Deoptimizer::BailoutType(MiscField::decode(instr->opcode()));
+      AssembleDeoptimizerCall(deopt_state_id, bailout_type);
       break;
     }
     case kArchRet:
@@ -610,6 +625,13 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       __ bind(ool->exit());
       break;
     }
+    case kArchStackSlot: {
+      FrameOffset offset =
+          frame_access_state()->GetFrameOffset(i.InputInt32(0));
+      __ Addu(i.OutputRegister(), offset.from_stack_pointer() ? sp : fp,
+              Operand(offset.offset()));
+      break;
+    }
     case kMipsAdd:
       __ Addu(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
       break;
@@ -633,9 +655,19 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       break;
     case kMipsDiv:
       __ Div(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
+      if (IsMipsArchVariant(kMips32r6)) {
+        __ selnez(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      } else {
+        __ Movz(i.OutputRegister(), i.InputRegister(1), i.InputRegister(1));
+      }
       break;
     case kMipsDivU:
       __ Divu(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
+      if (IsMipsArchVariant(kMips32r6)) {
+        __ selnez(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      } else {
+        __ Movz(i.OutputRegister(), i.InputRegister(1), i.InputRegister(1));
+      }
       break;
     case kMipsMod:
       __ Mod(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
@@ -663,6 +695,70 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
     case kMipsClz:
       __ Clz(i.OutputRegister(), i.InputRegister(0));
       break;
+    case kMipsCtz: {
+      Register reg1 = kScratchReg;
+      Register reg2 = kScratchReg2;
+      Label skip_for_zero;
+      Label end;
+      // Branch if the operand is zero
+      __ Branch(&skip_for_zero, eq, i.InputRegister(0), Operand(zero_reg));
+      // Find the number of bits before the last bit set to 1.
+      __ Subu(reg2, zero_reg, i.InputRegister(0));
+      __ And(reg2, reg2, i.InputRegister(0));
+      __ clz(reg2, reg2);
+      // Get the number of bits after the last bit set to 1.
+      __ li(reg1, 0x1F);
+      __ Subu(i.OutputRegister(), reg1, reg2);
+      __ Branch(&end);
+      __ bind(&skip_for_zero);
+      // If the operand is zero, return word length as the result.
+      __ li(i.OutputRegister(), 0x20);
+      __ bind(&end);
+    } break;
+    case kMipsPopcnt: {
+      Register reg1 = kScratchReg;
+      Register reg2 = kScratchReg2;
+      uint32_t m1 = 0x55555555;
+      uint32_t m2 = 0x33333333;
+      uint32_t m4 = 0x0f0f0f0f;
+      uint32_t m8 = 0x00ff00ff;
+      uint32_t m16 = 0x0000ffff;
+
+      // Put count of ones in every 2 bits into those 2 bits.
+      __ li(at, m1);
+      __ srl(reg1, i.InputRegister(0), 1);
+      __ And(reg2, i.InputRegister(0), at);
+      __ And(reg1, reg1, at);
+      __ addu(reg1, reg1, reg2);
+
+      // Put count of ones in every 4 bits into those 4 bits.
+      __ li(at, m2);
+      __ srl(reg2, reg1, 2);
+      __ And(reg2, reg2, at);
+      __ And(reg1, reg1, at);
+      __ addu(reg1, reg1, reg2);
+
+      // Put count of ones in every 8 bits into those 8 bits.
+      __ li(at, m4);
+      __ srl(reg2, reg1, 4);
+      __ And(reg2, reg2, at);
+      __ And(reg1, reg1, at);
+      __ addu(reg1, reg1, reg2);
+
+      // Put count of ones in every 16 bits into those 16 bits.
+      __ li(at, m8);
+      __ srl(reg2, reg1, 8);
+      __ And(reg2, reg2, at);
+      __ And(reg1, reg1, at);
+      __ addu(reg1, reg1, reg2);
+
+      // Calculate total number of ones.
+      __ li(at, m16);
+      __ srl(reg2, reg1, 16);
+      __ And(reg2, reg2, at);
+      __ And(reg1, reg1, at);
+      __ addu(i.OutputRegister(), reg1, reg2);
+    } break;
     case kMipsShl:
       if (instr->InputAt(1)->IsRegister()) {
         __ sllv(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
@@ -818,35 +914,35 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
                i.InputDoubleRegister(1));
       break;
     case kMipsFloat64RoundDown: {
-      ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(floor_l_d);
+      ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(floor);
       break;
     }
     case kMipsFloat32RoundDown: {
-      ASSEMBLE_ROUND_FLOAT_TO_FLOAT(floor_w_s);
+      ASSEMBLE_ROUND_FLOAT_TO_FLOAT(floor);
       break;
     }
     case kMipsFloat64RoundTruncate: {
-      ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(trunc_l_d);
+      ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(trunc);
       break;
     }
     case kMipsFloat32RoundTruncate: {
-      ASSEMBLE_ROUND_FLOAT_TO_FLOAT(trunc_w_s);
+      ASSEMBLE_ROUND_FLOAT_TO_FLOAT(trunc);
       break;
     }
     case kMipsFloat64RoundUp: {
-      ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(ceil_l_d);
+      ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(ceil);
       break;
     }
     case kMipsFloat32RoundUp: {
-      ASSEMBLE_ROUND_FLOAT_TO_FLOAT(ceil_w_s);
+      ASSEMBLE_ROUND_FLOAT_TO_FLOAT(ceil);
       break;
     }
     case kMipsFloat64RoundTiesEven: {
-      ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(round_l_d);
+      ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(round);
       break;
     }
     case kMipsFloat32RoundTiesEven: {
-      ASSEMBLE_ROUND_FLOAT_TO_FLOAT(round_w_s);
+      ASSEMBLE_ROUND_FLOAT_TO_FLOAT(round);
       break;
     }
     case kMipsFloat64Max: {
@@ -919,6 +1015,12 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       __ cvt_d_w(i.OutputDoubleRegister(), scratch);
       break;
     }
+    case kMipsCvtSW: {
+      FPURegister scratch = kScratchDoubleReg;
+      __ mtc1(i.InputRegister(0), scratch);
+      __ cvt_s_w(i.OutputDoubleRegister(), scratch);
+      break;
+    }
     case kMipsCvtDUw: {
       FPURegister scratch = kScratchDoubleReg;
       __ Cvt_d_uw(i.OutputDoubleRegister(), i.InputRegister(0), scratch);
@@ -946,6 +1048,30 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       FPURegister scratch = kScratchDoubleReg;
       // Other arches use round to zero here, so we follow.
       __ trunc_w_d(scratch, i.InputDoubleRegister(0));
+      __ mfc1(i.OutputRegister(), scratch);
+      break;
+    }
+    case kMipsFloorWS: {
+      FPURegister scratch = kScratchDoubleReg;
+      __ floor_w_s(scratch, i.InputDoubleRegister(0));
+      __ mfc1(i.OutputRegister(), scratch);
+      break;
+    }
+    case kMipsCeilWS: {
+      FPURegister scratch = kScratchDoubleReg;
+      __ ceil_w_s(scratch, i.InputDoubleRegister(0));
+      __ mfc1(i.OutputRegister(), scratch);
+      break;
+    }
+    case kMipsRoundWS: {
+      FPURegister scratch = kScratchDoubleReg;
+      __ round_w_s(scratch, i.InputDoubleRegister(0));
+      __ mfc1(i.OutputRegister(), scratch);
+      break;
+    }
+    case kMipsTruncWS: {
+      FPURegister scratch = kScratchDoubleReg;
+      __ trunc_w_s(scratch, i.InputDoubleRegister(0));
       __ mfc1(i.OutputRegister(), scratch);
       break;
     }
@@ -1166,7 +1292,7 @@ void CodeGenerator::AssembleArchBranch(Instruction* instr, BranchInfo* branch) {
         !__ IsDoubleZeroRegSet()) {
       __ Move(kDoubleRegZero, 0.0);
     }
-    __ BranchF32(tlabel, NULL, cc, left, right);
+    __ BranchF32(tlabel, nullptr, cc, left, right);
   } else if (instr->arch_opcode() == kMipsCmpD) {
     if (!convertCondition(branch->condition, cc)) {
       UNSUPPORTED_COND(kMips64CmpD, branch->condition);
@@ -1177,7 +1303,7 @@ void CodeGenerator::AssembleArchBranch(Instruction* instr, BranchInfo* branch) {
         !__ IsDoubleZeroRegSet()) {
       __ Move(kDoubleRegZero, 0.0);
     }
-    __ BranchF64(tlabel, NULL, cc, left, right);
+    __ BranchF64(tlabel, nullptr, cc, left, right);
   } else {
     PrintF("AssembleArchBranch Unimplemented arch_opcode: %d\n",
            instr->arch_opcode());
@@ -1361,19 +1487,10 @@ void CodeGenerator::AssembleArchTableSwitch(Instruction* instr) {
   MipsOperandConverter i(this, instr);
   Register input = i.InputRegister(0);
   size_t const case_count = instr->InputCount() - 2;
-  Label here;
   __ Branch(GetLabel(i.InputRpo(1)), hs, input, Operand(case_count));
-  __ BlockTrampolinePoolFor(case_count + 6);
-  __ bal(&here);
-  __ sll(at, input, 2);  // Branch delay slot.
-  __ bind(&here);
-  __ addu(at, at, ra);
-  __ lw(at, MemOperand(at, 4 * v8::internal::Assembler::kInstrSize));
-  __ jr(at);
-  __ nop();  // Branch delay slot nop.
-  for (size_t index = 0; index < case_count; ++index) {
-    __ dd(GetLabel(i.InputRpo(index + 2)));
-  }
+  __ GenerateSwitchTable(input, case_count, [&i, this](size_t index) {
+    return GetLabel(i.InputRpo(index + 2));
+  });
 }
 
 
@@ -1392,8 +1509,7 @@ void CodeGenerator::AssemblePrologue() {
     __ Push(ra, fp);
     __ mov(fp, sp);
   } else if (descriptor->IsJSFunctionCall()) {
-    CompilationInfo* info = this->info();
-    __ Prologue(info->IsCodePreAgingActive());
+    __ Prologue(this->info()->GeneratePreagedPrologue());
   } else if (frame()->needs_frame()) {
     __ StubPrologue();
   } else {
@@ -1486,7 +1602,7 @@ void CodeGenerator::AssembleReturn() {
 
 void CodeGenerator::AssembleMove(InstructionOperand* source,
                                  InstructionOperand* destination) {
-  MipsOperandConverter g(this, NULL);
+  MipsOperandConverter g(this, nullptr);
   // Dispatch on the source and destination operand kinds.  Not all
   // combinations are possible.
   if (source->IsRegister()) {
@@ -1592,7 +1708,7 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
 
 void CodeGenerator::AssembleSwap(InstructionOperand* source,
                                  InstructionOperand* destination) {
-  MipsOperandConverter g(this, NULL);
+  MipsOperandConverter g(this, nullptr);
   // Dispatch on the source and destination operand kinds.  Not all
   // combinations are possible.
   if (source->IsRegister()) {

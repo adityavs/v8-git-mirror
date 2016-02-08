@@ -451,12 +451,15 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       AssembleArchTableSwitch(instr);
       break;
     case kArchNop:
+    case kArchThrowTerminator:
       // don't emit code for nops.
       break;
     case kArchDeoptimize: {
       int deopt_state_id =
           BuildTranslation(instr, -1, 0, OutputFrameStateCombine::Ignore());
-      AssembleDeoptimizerCall(deopt_state_id, Deoptimizer::EAGER);
+      Deoptimizer::BailoutType bailout_type =
+          Deoptimizer::BailoutType(MiscField::decode(instr->opcode()));
+      AssembleDeoptimizerCall(deopt_state_id, bailout_type);
       break;
     }
     case kArchRet:
@@ -494,6 +497,18 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
                        MemoryChunk::kPointersFromHereAreInterestingMask,
                        not_zero, ool->entry());
       __ bind(ool->exit());
+      break;
+    }
+    case kArchStackSlot: {
+      FrameOffset offset =
+          frame_access_state()->GetFrameOffset(i.InputInt32(0));
+      Register base;
+      if (offset.from_stack_pointer()) {
+        base = esp;
+      } else {
+        base = ebp;
+      }
+      __ lea(i.OutputRegister(), Operand(base, offset.offset()));
       break;
     }
     case kIA32Add:
@@ -736,6 +751,21 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
     case kSSEFloat64ToFloat32:
       __ cvtsd2ss(i.OutputDoubleRegister(), i.InputOperand(0));
       break;
+    case kSSEFloat32ToInt32:
+      __ cvttss2si(i.OutputRegister(), i.InputOperand(0));
+      break;
+    case kSSEFloat32ToUint32: {
+      Label success;
+      __ cvttss2si(i.OutputRegister(), i.InputOperand(0));
+      __ test(i.OutputRegister(), i.OutputRegister());
+      __ j(positive, &success);
+      __ Move(kScratchDoubleReg, static_cast<float>(INT32_MIN));
+      __ addss(kScratchDoubleReg, i.InputOperand(0));
+      __ cvttss2si(i.OutputRegister(), kScratchDoubleReg);
+      __ or_(i.OutputRegister(), Immediate(0x80000000));
+      __ bind(&success);
+      break;
+    }
     case kSSEFloat64ToInt32:
       __ cvttsd2si(i.OutputRegister(), i.InputOperand(0));
       break;
@@ -744,6 +774,16 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       __ addsd(kScratchDoubleReg, i.InputOperand(0));
       __ cvttsd2si(i.OutputRegister(), kScratchDoubleReg);
       __ add(i.OutputRegister(), Immediate(0x80000000));
+      break;
+    }
+    case kSSEInt32ToFloat32:
+      __ cvtsi2ss(i.OutputDoubleRegister(), i.InputOperand(0));
+      break;
+    case kSSEUint32ToFloat32: {
+      Register scratch0 = i.TempRegister(0);
+      Register scratch1 = i.TempRegister(1);
+      __ mov(scratch0, i.InputOperand(0));
+      __ Cvtui2ss(i.OutputDoubleRegister(), scratch0, scratch1);
       break;
     }
     case kSSEInt32ToFloat64:
@@ -997,6 +1037,40 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       }
       break;
     }
+    case kIA32PushFloat32:
+      if (instr->InputAt(0)->IsDoubleRegister()) {
+        __ sub(esp, Immediate(kDoubleSize));
+        __ movss(Operand(esp, 0), i.InputDoubleRegister(0));
+        frame_access_state()->IncreaseSPDelta(kDoubleSize / kPointerSize);
+      } else if (HasImmediateInput(instr, 0)) {
+        __ Move(kScratchDoubleReg, i.InputDouble(0));
+        __ sub(esp, Immediate(kDoubleSize));
+        __ movss(Operand(esp, 0), kScratchDoubleReg);
+        frame_access_state()->IncreaseSPDelta(kDoubleSize / kPointerSize);
+      } else {
+        __ movsd(kScratchDoubleReg, i.InputOperand(0));
+        __ sub(esp, Immediate(kDoubleSize));
+        __ movss(Operand(esp, 0), kScratchDoubleReg);
+        frame_access_state()->IncreaseSPDelta(kDoubleSize / kPointerSize);
+      }
+      break;
+    case kIA32PushFloat64:
+      if (instr->InputAt(0)->IsDoubleRegister()) {
+        __ sub(esp, Immediate(kDoubleSize));
+        __ movsd(Operand(esp, 0), i.InputDoubleRegister(0));
+        frame_access_state()->IncreaseSPDelta(kDoubleSize / kPointerSize);
+      } else if (HasImmediateInput(instr, 0)) {
+        __ Move(kScratchDoubleReg, i.InputDouble(0));
+        __ sub(esp, Immediate(kDoubleSize));
+        __ movsd(Operand(esp, 0), kScratchDoubleReg);
+        frame_access_state()->IncreaseSPDelta(kDoubleSize / kPointerSize);
+      } else {
+        __ movsd(kScratchDoubleReg, i.InputOperand(0));
+        __ sub(esp, Immediate(kDoubleSize));
+        __ movsd(Operand(esp, 0), kScratchDoubleReg);
+        frame_access_state()->IncreaseSPDelta(kDoubleSize / kPointerSize);
+      }
+      break;
     case kIA32Push:
       if (instr->InputAt(0)->IsDoubleRegister()) {
         __ sub(esp, Immediate(kDoubleSize));
@@ -1383,10 +1457,9 @@ void CodeGenerator::AssemblePrologue() {
     __ push(ebp);
     __ mov(ebp, esp);
   } else if (descriptor->IsJSFunctionCall()) {
-    // TODO(turbofan): this prologue is redundant with OSR, but needed for
+    // TODO(turbofan): this prologue is redundant with OSR, but still needed for
     // code aging.
-    CompilationInfo* info = this->info();
-    __ Prologue(info->IsCodePreAgingActive());
+    __ Prologue(this->info()->GeneratePreagedPrologue());
   } else if (frame()->needs_frame()) {
     __ StubPrologue();
   } else {
@@ -1463,7 +1536,7 @@ void CodeGenerator::AssembleReturn() {
 
 void CodeGenerator::AssembleMove(InstructionOperand* source,
                                  InstructionOperand* destination) {
-  IA32OperandConverter g(this, NULL);
+  IA32OperandConverter g(this, nullptr);
   // Dispatch on the source and destination operand kinds.  Not all
   // combinations are possible.
   if (source->IsRegister()) {
@@ -1573,17 +1646,26 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
 
 void CodeGenerator::AssembleSwap(InstructionOperand* source,
                                  InstructionOperand* destination) {
-  IA32OperandConverter g(this, NULL);
+  IA32OperandConverter g(this, nullptr);
   // Dispatch on the source and destination operand kinds.  Not all
   // combinations are possible.
   if (source->IsRegister() && destination->IsRegister()) {
     // Register-register.
     Register src = g.ToRegister(source);
     Register dst = g.ToRegister(destination);
-    __ xchg(dst, src);
+    __ push(src);
+    __ mov(src, dst);
+    __ pop(dst);
   } else if (source->IsRegister() && destination->IsStackSlot()) {
     // Register-memory.
-    __ xchg(g.ToRegister(source), g.ToOperand(destination));
+    Register src = g.ToRegister(source);
+    __ push(src);
+    frame_access_state()->IncreaseSPDelta(1);
+    Operand dst = g.ToOperand(destination);
+    __ mov(src, dst);
+    frame_access_state()->IncreaseSPDelta(-1);
+    dst = g.ToOperand(destination);
+    __ pop(dst);
   } else if (source->IsStackSlot() && destination->IsStackSlot()) {
     // Memory-memory.
     Operand dst1 = g.ToOperand(destination);

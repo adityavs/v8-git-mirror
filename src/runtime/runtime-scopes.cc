@@ -8,6 +8,7 @@
 #include "src/arguments.h"
 #include "src/ast/scopeinfo.h"
 #include "src/ast/scopes.h"
+#include "src/deoptimizer.h"
 #include "src/frames-inl.h"
 #include "src/isolate-inl.h"
 #include "src/messages.h"
@@ -64,21 +65,27 @@ static Object* DeclareGlobals(Isolate* isolate, Handle<JSGlobalObject> global,
       // Check whether we can reconfigure the existing property into a
       // function.
       PropertyDetails old_details = it.property_details();
-      // TODO(verwaest): ACCESSOR_CONSTANT invalidly includes
-      // ExecutableAccessInfo,
-      // which are actually data properties, not accessor properties.
       if (old_details.IsReadOnly() || old_details.IsDontEnum() ||
-          old_details.type() == ACCESSOR_CONSTANT) {
+          (it.state() == LookupIterator::ACCESSOR &&
+           it.GetAccessors()->IsAccessorPair())) {
         return ThrowRedeclarationError(isolate, name);
       }
       // If the existing property is not configurable, keep its attributes. Do
       attr = old_attributes;
     }
+
+    // If the current state is ACCESSOR, this could mean it's an AccessorInfo
+    // type property. We are not allowed to call into such setters during global
+    // function declaration since this would break e.g., onload. Meaning
+    // 'function onload() {}' would invalidly register that function as the
+    // onload callback. To avoid this situation, we first delete the property
+    // before readding it as a regular data property below.
+    if (it.state() == LookupIterator::ACCESSOR) it.Delete();
   }
 
   // Define or redefine own property.
-  RETURN_FAILURE_ON_EXCEPTION(isolate, JSObject::SetOwnPropertyIgnoreAttributes(
-                                           global, name, value, attr));
+  RETURN_FAILURE_ON_EXCEPTION(
+      isolate, JSObject::DefineOwnPropertyIgnoreAttributes(&it, value, attr));
 
   return isolate->heap()->undefined_value();
 }
@@ -195,8 +202,8 @@ RUNTIME_FUNCTION(Runtime_InitializeConstGlobal) {
     }
   }
 
-  RETURN_FAILURE_ON_EXCEPTION(isolate, JSObject::SetOwnPropertyIgnoreAttributes(
-                                           global, name, value, attr));
+  RETURN_FAILURE_ON_EXCEPTION(
+      isolate, JSObject::DefineOwnPropertyIgnoreAttributes(&it, value, attr));
 
   return *value;
 }
@@ -412,6 +419,66 @@ RUNTIME_FUNCTION(Runtime_InitializeLegacyConstLookupSlot) {
 
 namespace {
 
+// Find the arguments of the JavaScript function invocation that called
+// into C++ code. Collect these in a newly allocated array of handles.
+base::SmartArrayPointer<Handle<Object>> GetCallerArguments(Isolate* isolate,
+                                                           int* total_argc) {
+  // Find frame containing arguments passed to the caller.
+  JavaScriptFrameIterator it(isolate);
+  JavaScriptFrame* frame = it.frame();
+  List<JSFunction*> functions(2);
+  frame->GetFunctions(&functions);
+  if (functions.length() > 1) {
+    int inlined_jsframe_index = functions.length() - 1;
+    TranslatedState translated_values(frame);
+    translated_values.Prepare(false, frame->fp());
+
+    int argument_count = 0;
+    TranslatedFrame* translated_frame =
+        translated_values.GetArgumentsInfoFromJSFrameIndex(
+            inlined_jsframe_index, &argument_count);
+    TranslatedFrame::iterator iter = translated_frame->begin();
+
+    // Skip the function.
+    iter++;
+
+    // Skip the receiver.
+    iter++;
+    argument_count--;
+
+    *total_argc = argument_count;
+    base::SmartArrayPointer<Handle<Object>> param_data(
+        NewArray<Handle<Object>>(*total_argc));
+    bool should_deoptimize = false;
+    for (int i = 0; i < argument_count; i++) {
+      should_deoptimize = should_deoptimize || iter->IsMaterializedObject();
+      Handle<Object> value = iter->GetValue();
+      param_data[i] = value;
+      iter++;
+    }
+
+    if (should_deoptimize) {
+      translated_values.StoreMaterializedValuesAndDeopt();
+    }
+
+    return param_data;
+  } else {
+    it.AdvanceToArgumentsFrame();
+    frame = it.frame();
+    int args_count = frame->ComputeParametersCount();
+
+    *total_argc = args_count;
+    base::SmartArrayPointer<Handle<Object>> param_data(
+        NewArray<Handle<Object>>(*total_argc));
+    for (int i = 0; i < args_count; i++) {
+      Handle<Object> val = Handle<Object>(frame->GetParameter(i), isolate);
+      param_data[i] = val;
+    }
+    return param_data;
+  }
+}
+
+
 template <typename T>
 Handle<JSObject> NewSloppyArguments(Isolate* isolate, Handle<JSFunction> callee,
                                     T parameters, int argument_count) {
@@ -521,6 +588,26 @@ Handle<JSObject> NewStrictArguments(Isolate* isolate, Handle<JSFunction> callee,
 }
 
 
+template <typename T>
+Handle<JSObject> NewRestArguments(Isolate* isolate, Handle<JSFunction> callee,
+                                  T parameters, int argument_count,
+                                  int start_index) {
+  int num_elements = std::max(0, argument_count - start_index);
+  Handle<JSObject> result = isolate->factory()->NewJSArray(
+      FAST_ELEMENTS, num_elements, num_elements, Strength::WEAK,
+      DONT_INITIALIZE_ARRAY_ELEMENTS);
+  {
+    DisallowHeapAllocation no_gc;
+    FixedArray* elements = FixedArray::cast(result->elements());
+    WriteBarrierMode mode = result->GetWriteBarrierMode(no_gc);
+    for (int i = 0; i < num_elements; i++) {
+      elements->set(i, parameters[i + start_index], mode);
+    }
+  }
+  return result;
+}
+
+
 class HandleArguments BASE_EMBEDDED {
  public:
   explicit HandleArguments(Handle<Object>* array) : array_(array) {}
@@ -548,10 +635,10 @@ RUNTIME_FUNCTION(Runtime_NewSloppyArguments_Generic) {
   DCHECK(args.length() == 1);
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, callee, 0);
   // This generic runtime function can also be used when the caller has been
-  // inlined, we use the slow but accurate {Runtime::GetCallerArguments}.
+  // inlined, we use the slow but accurate {GetCallerArguments}.
   int argument_count = 0;
   base::SmartArrayPointer<Handle<Object>> arguments =
-      Runtime::GetCallerArguments(isolate, 0, &argument_count);
+      GetCallerArguments(isolate, &argument_count);
   HandleArguments argument_getter(arguments.get());
   return *NewSloppyArguments(isolate, callee, argument_getter, argument_count);
 }
@@ -562,12 +649,28 @@ RUNTIME_FUNCTION(Runtime_NewStrictArguments_Generic) {
   DCHECK(args.length() == 1);
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, callee, 0);
   // This generic runtime function can also be used when the caller has been
-  // inlined, we use the slow but accurate {Runtime::GetCallerArguments}.
+  // inlined, we use the slow but accurate {GetCallerArguments}.
   int argument_count = 0;
   base::SmartArrayPointer<Handle<Object>> arguments =
-      Runtime::GetCallerArguments(isolate, 0, &argument_count);
+      GetCallerArguments(isolate, &argument_count);
   HandleArguments argument_getter(arguments.get());
   return *NewStrictArguments(isolate, callee, argument_getter, argument_count);
+}
+
+
+RUNTIME_FUNCTION(Runtime_NewRestArguments_Generic) {
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 2);
+  CONVERT_ARG_HANDLE_CHECKED(JSFunction, callee, 0)
+  CONVERT_SMI_ARG_CHECKED(start_index, 1);
+  // This generic runtime function can also be used when the caller has been
+  // inlined, we use the slow but accurate {GetCallerArguments}.
+  int argument_count = 0;
+  base::SmartArrayPointer<Handle<Object>> arguments =
+      GetCallerArguments(isolate, &argument_count);
+  HandleArguments argument_getter(arguments.get());
+  return *NewRestArguments(isolate, callee, argument_getter, argument_count,
+                           start_index);
 }
 
 
@@ -602,6 +705,25 @@ RUNTIME_FUNCTION(Runtime_NewStrictArguments) {
 #endif  // DEBUG
   ParameterArguments argument_getter(parameters);
   return *NewStrictArguments(isolate, callee, argument_getter, argument_count);
+}
+
+
+RUNTIME_FUNCTION(Runtime_NewRestParam) {
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 3);
+  CONVERT_SMI_ARG_CHECKED(num_params, 0);
+  Object** parameters = reinterpret_cast<Object**>(args[1]);
+  CONVERT_SMI_ARG_CHECKED(rest_index, 2);
+#ifdef DEBUG
+  // This runtime function does not materialize the correct arguments when the
+  // caller has been inlined, better make sure we are not hitting that case.
+  JavaScriptFrameIterator it(isolate);
+  DCHECK(!it.frame()->HasInlinedFrames());
+#endif  // DEBUG
+  Handle<JSFunction> callee;
+  ParameterArguments argument_getter(parameters);
+  return *NewRestArguments(isolate, callee, argument_getter, num_params,
+                           rest_index);
 }
 
 
@@ -826,8 +948,10 @@ RUNTIME_FUNCTION(Runtime_DeclareModules) {
       }
     }
 
-    if (JSObject::PreventExtensions(module, Object::THROW_ON_ERROR).IsNothing())
+    if (JSObject::PreventExtensions(module, Object::THROW_ON_ERROR)
+            .IsNothing()) {
       DCHECK(false);
+    }
   }
 
   DCHECK(!isolate->has_pending_exception());
@@ -861,10 +985,10 @@ RUNTIME_FUNCTION(Runtime_DeleteLookupSlot) {
     return isolate->heap()->false_value();
   }
 
-  // The slot was found in a JSObject, either a context extension object,
+  // The slot was found in a JSReceiver, either a context extension object,
   // the global object, or the subject of a with.  Try to delete it
   // (respecting DONT_DELETE).
-  Handle<JSObject> object = Handle<JSObject>::cast(holder);
+  Handle<JSReceiver> object = Handle<JSReceiver>::cast(holder);
   Maybe<bool> result = JSReceiver::DeleteProperty(object, name);
   MAYBE_RETURN(result, isolate->heap()->exception());
   return isolate->heap()->ToBoolean(result.FromJust());
@@ -1055,7 +1179,7 @@ RUNTIME_FUNCTION(Runtime_ArgumentsLength) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 0);
   int argument_count = 0;
-  Runtime::GetCallerArguments(isolate, 0, &argument_count);
+  GetCallerArguments(isolate, &argument_count);
   return Smi::FromInt(argument_count);
 }
 
@@ -1068,7 +1192,7 @@ RUNTIME_FUNCTION(Runtime_Arguments) {
   // Determine the actual arguments passed to the function.
   int argument_count_signed = 0;
   base::SmartArrayPointer<Handle<Object>> arguments =
-      Runtime::GetCallerArguments(isolate, 0, &argument_count_signed);
+      GetCallerArguments(isolate, &argument_count_signed);
   const uint32_t argument_count = argument_count_signed;
 
   // Try to convert the key to an index. If successful and within

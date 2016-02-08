@@ -55,7 +55,7 @@ static unsigned CpuFeaturesImpliedByCompiler() {
 
 void CpuFeatures::ProbeImpl(bool cross_compile) {
   supported_ |= CpuFeaturesImpliedByCompiler();
-  cache_line_size_ = 128;
+  icache_line_size_ = 128;
 
   // Only use statically determined features for cross compile (snapshot).
   if (cross_compile) return;
@@ -84,6 +84,9 @@ void CpuFeatures::ProbeImpl(bool cross_compile) {
   if (!(cpu.part() == base::CPU::PPC_G5 || cpu.part() == base::CPU::PPC_G4)) {
     // Assume support
     supported_ |= (1u << FPU);
+  }
+  if (cpu.icache_line_size() != base::CPU::UNKNOWN_CACHE_LINE_SIZE) {
+    icache_line_size_ = cpu.icache_line_size();
   }
 #elif V8_OS_AIX
   // Assume support FP support and default cache line size
@@ -1504,14 +1507,14 @@ void Assembler::divdu(Register dst, Register src1, Register src2, OEBit o,
 // Code address skips the function descriptor "header".
 // TOC and static chain are ignored and set to 0.
 void Assembler::function_descriptor() {
-#if ABI_USES_FUNCTION_DESCRIPTORS
-  Label instructions;
-  DCHECK(pc_offset() == 0);
-  emit_label_addr(&instructions);
-  dp(0);
-  dp(0);
-  bind(&instructions);
-#endif
+  if (ABI_USES_FUNCTION_DESCRIPTORS) {
+    Label instructions;
+    DCHECK(pc_offset() == 0);
+    emit_label_addr(&instructions);
+    dp(0);
+    dp(0);
+    bind(&instructions);
+  }
 }
 
 
@@ -1844,7 +1847,10 @@ void Assembler::mtxer(Register src) {
 }
 
 
-void Assembler::mcrfs(int bf, int bfa) {
+void Assembler::mcrfs(CRegister cr, FPSCRBit bit) {
+  DCHECK(static_cast<int>(bit) < 32);
+  int bf = cr.code();
+  int bfa = bit / CRWIDTH;
   emit(EXT4 | MCRFS | bf * B23 | bfa * B18);
 }
 
@@ -2216,6 +2222,20 @@ void Assembler::fsel(const DoubleRegister frt, const DoubleRegister fra,
 void Assembler::fneg(const DoubleRegister frt, const DoubleRegister frb,
                      RCBit rc) {
   emit(EXT4 | FNEG | frt.code() * B21 | frb.code() * B11 | rc);
+}
+
+
+void Assembler::mtfsb0(FPSCRBit bit, RCBit rc) {
+  DCHECK(static_cast<int>(bit) < 32);
+  int bt = bit;
+  emit(EXT4 | MTFSB0 | bt * B21 | rc);
+}
+
+
+void Assembler::mtfsb1(FPSCRBit bit, RCBit rc) {
+  DCHECK(static_cast<int>(bit) < 32);
+  int bt = bit;
+  emit(EXT4 | MTFSB1 | bt * B21 | rc);
 }
 
 

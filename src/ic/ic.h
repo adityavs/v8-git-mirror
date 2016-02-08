@@ -143,9 +143,7 @@ class IC {
                                     State old_state, State new_state,
                                     bool target_remains_ic_stub);
   // As a vector-based IC, type feedback must be updated differently.
-  static void OnTypeFeedbackChanged(Isolate* isolate, Code* host,
-                                    TypeFeedbackVector* vector, State old_state,
-                                    State new_state);
+  static void OnTypeFeedbackChanged(Isolate* isolate, Code* host);
   static void PostPatching(Address address, Code* target, Code* old_target);
 
   // Compute the handler either by compiling or by retrieving a cached version.
@@ -286,9 +284,11 @@ class CallIC : public IC {
 
   // Code generator routines.
   static Handle<Code> initialize_stub(Isolate* isolate, int argc,
-                                      ConvertReceiverMode mode);
+                                      ConvertReceiverMode mode,
+                                      TailCallMode tail_call_mode);
   static Handle<Code> initialize_stub_in_optimized_code(
-      Isolate* isolate, int argc, ConvertReceiverMode mode);
+      Isolate* isolate, int argc, ConvertReceiverMode mode,
+      TailCallMode tail_call_mode);
 
   static void Clear(Isolate* isolate, Code* host, CallICNexus* nexus);
 };

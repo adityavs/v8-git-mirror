@@ -19,8 +19,19 @@
 namespace v8 {
 namespace internal {
 
+class AllocationInfo;
+class CompactionSpace;
 class CompactionSpaceCollection;
+class FreeList;
+class InlineAllocationObserver;
 class Isolate;
+class MemoryAllocator;
+class MemoryChunk;
+class PagedSpace;
+class SemiSpace;
+class SkipList;
+class SlotsBuffer;
+class Space;
 
 // -----------------------------------------------------------------------------
 // Heap structures:
@@ -96,13 +107,6 @@ class Isolate;
 #define DCHECK_MAP_PAGE_INDEX(index) \
   DCHECK((0 <= index) && (index <= MapSpace::kMaxMapPageIndex))
 
-class AllocationInfo;
-class CompactionSpace;
-class FreeList;
-class MemoryAllocator;
-class MemoryChunk;
-class PagedSpace;
-class Space;
 
 class MarkBit {
  public:
@@ -284,9 +288,6 @@ class Bitmap {
 };
 
 
-class SkipList;
-class SlotsBuffer;
-
 // MemoryChunk represents a memory region owned by a specific space.
 // It is divided into the header and the body. Chunk start is always
 // 1MB aligned. Start of the body is aligned so it can accommodate
@@ -307,10 +308,6 @@ class MemoryChunk {
     NEVER_EVACUATE,  // May contain immortal immutables.
     POPULAR_PAGE,    // Slots buffer of this page overflowed on the previous GC.
 
-    // WAS_SWEPT indicates that marking bits have been cleared by the sweeper,
-    // otherwise marking bits are still intact.
-    WAS_SWEPT,
-
     // Large objects can have a progress bar in their page header. These object
     // are scanned in increments and will be kept black while being scanned.
     // Even if the mutator writes to them they will be kept black and a white
@@ -322,6 +319,9 @@ class MemoryChunk {
     // are set. It forces the page to become an evacuation candidate at next
     // candidates selection cycle.
     FORCE_EVACUATION_CANDIDATE_FOR_TESTING,
+
+    // This flag is inteded to be used for testing.
+    NEVER_ALLOCATE_ON_PAGE,
 
     // The memory chunk is already logically freed, however the actual freeing
     // still has to be performed.
@@ -349,16 +349,14 @@ class MemoryChunk {
   };
 
   // |kSweepingDone|: The page state when sweeping is complete or sweeping must
-  //   not be performed on that page.
-  // |kSweepingFinalize|: A sweeper thread is done sweeping this page and will
-  //   not touch the page memory anymore.
-  // |kSweepingInProgress|: This page is currently swept by a sweeper thread.
+  //   not be performed on that page. Sweeper threads that are done with their
+  //   work will set this value and not touch the page anymore.
   // |kSweepingPending|: This page is ready for parallel sweeping.
-  enum ParallelSweepingState {
+  // |kSweepingInProgress|: This page is currently swept by a sweeper thread.
+  enum ConcurrentSweepingState {
     kSweepingDone,
-    kSweepingFinalize,
+    kSweepingPending,
     kSweepingInProgress,
-    kSweepingPending
   };
 
   // Every n write barrier invocations we go to runtime even though
@@ -393,7 +391,7 @@ class MemoryChunk {
       + 2 * kPointerSize          // base::VirtualMemory reservation_
       + kPointerSize              // Address owner_
       + kPointerSize              // Heap* heap_
-      + kIntSize;                 // int store_buffer_counter_
+      + kIntSize;                 // int progress_bar_
 
   static const size_t kSlotsBufferOffset =
       kLiveBytesOffset + kIntSize;  // int live_byte_count_
@@ -405,7 +403,6 @@ class MemoryChunk {
   static const size_t kMinHeaderSize =
       kWriteBarrierCounterOffset +
       kIntptrSize         // intptr_t write_barrier_counter_
-      + kIntSize          // int progress_bar_
       + kPointerSize      // AtomicValue high_water_mark_
       + kPointerSize      // base::Mutex* mutex_
       + kPointerSize      // base::AtomicWord parallel_sweeping_
@@ -417,7 +414,7 @@ class MemoryChunk {
   // We add some more space to the computed header size to amount for missing
   // alignment requirements in our computation.
   // Try to get kHeaderSize properly aligned on 32-bit and 64-bit machines.
-  static const size_t kHeaderSize = kMinHeaderSize + kIntSize;
+  static const size_t kHeaderSize = kMinHeaderSize;
 
   static const int kBodyOffset =
       CODE_POINTER_ALIGN(kHeaderSize + Bitmap::kSize);
@@ -516,11 +513,6 @@ class MemoryChunk {
   }
   inline void set_scan_on_scavenge(bool scan);
 
-  int store_buffer_counter() { return store_buffer_counter_; }
-  void set_store_buffer_counter(int counter) {
-    store_buffer_counter_ = counter;
-  }
-
   bool Contains(Address addr) {
     return addr >= area_start() && addr < area_end();
   }
@@ -558,8 +550,8 @@ class MemoryChunk {
   // Return all current flags.
   intptr_t GetFlags() { return flags_; }
 
-  AtomicValue<ParallelSweepingState>& parallel_sweeping_state() {
-    return parallel_sweeping_;
+  AtomicValue<ConcurrentSweepingState>& concurrent_sweeping_state() {
+    return concurrent_sweeping_;
   }
 
   AtomicValue<ParallelCompactingState>& parallel_compaction_state() {
@@ -570,19 +562,6 @@ class MemoryChunk {
 
   base::Mutex* mutex() { return mutex_; }
 
-  // WaitUntilSweepingCompleted only works when concurrent sweeping is in
-  // progress. In particular, when we know that right before this call a
-  // sweeper thread was sweeping this page.
-  void WaitUntilSweepingCompleted() {
-    mutex_->Lock();
-    mutex_->Unlock();
-    DCHECK(SweepingCompleted());
-  }
-
-  bool SweepingCompleted() {
-    return parallel_sweeping_state().Value() <= kSweepingFinalize;
-  }
-
   // Manage live byte count (count of bytes known to be live,
   // because they are marked black).
   void ResetLiveBytes() {
@@ -592,6 +571,7 @@ class MemoryChunk {
     }
     live_byte_count_ = 0;
   }
+
   void IncrementLiveBytes(int by) {
     if (FLAG_gc_verbose) {
       printf("UpdateLiveBytes:%p:%x%c=%x->%x\n", static_cast<void*>(this),
@@ -599,11 +579,19 @@ class MemoryChunk {
              live_byte_count_ + by);
     }
     live_byte_count_ += by;
+    DCHECK_GE(live_byte_count_, 0);
     DCHECK_LE(static_cast<unsigned>(live_byte_count_), size_);
   }
+
   int LiveBytes() {
-    DCHECK(static_cast<unsigned>(live_byte_count_) <= size_);
+    DCHECK_LE(static_cast<unsigned>(live_byte_count_), size_);
     return live_byte_count_;
+  }
+
+  void SetLiveBytes(int live_bytes) {
+    DCHECK_GE(live_bytes, 0);
+    DCHECK_LE(static_cast<unsigned>(live_bytes), size_);
+    live_byte_count_ = live_bytes;
   }
 
   int write_barrier_counter() {
@@ -629,13 +617,6 @@ class MemoryChunk {
       set_progress_bar(0);
       ClearFlag(MemoryChunk::HAS_PROGRESS_BAR);
     }
-  }
-
-  bool IsLeftOfProgressBar(Object** slot) {
-    Address slot_address = reinterpret_cast<Address>(slot);
-    DCHECK(slot_address > this->address());
-    return (slot_address - (this->address() + kObjectStartOffset)) <
-           progress_bar();
   }
 
   size_t size() const { return size_; }
@@ -687,6 +668,10 @@ class MemoryChunk {
   bool IsEvacuationCandidate() {
     DCHECK(!(IsFlagSet(NEVER_EVACUATE) && IsFlagSet(EVACUATION_CANDIDATE)));
     return IsFlagSet(EVACUATION_CANDIDATE);
+  }
+
+  bool CanAllocate() {
+    return !IsEvacuationCandidate() && !IsFlagSet(NEVER_ALLOCATE_ON_PAGE);
   }
 
   bool ShouldSkipEvacuationSlotRecording() {
@@ -742,23 +727,20 @@ class MemoryChunk {
   // in a fixed array.
   Address owner_;
   Heap* heap_;
-  // Used by the store buffer to keep track of which pages to mark scan-on-
-  // scavenge.
-  int store_buffer_counter_;
+  // Used by the incremental marker to keep track of the scanning progress in
+  // large objects that have a progress bar and are scanned in increments.
+  int progress_bar_;
   // Count of bytes marked black on page.
   int live_byte_count_;
   SlotsBuffer* slots_buffer_;
   SkipList* skip_list_;
   intptr_t write_barrier_counter_;
-  // Used by the incremental marker to keep track of the scanning progress in
-  // large objects that have a progress bar and are scanned in increments.
-  int progress_bar_;
   // Assuming the initial allocation on a page is sequential,
   // count highest number of bytes ever allocated on the page.
   AtomicValue<intptr_t> high_water_mark_;
 
   base::Mutex* mutex_;
-  AtomicValue<ParallelSweepingState> parallel_sweeping_;
+  AtomicValue<ConcurrentSweepingState> concurrent_sweeping_;
   AtomicValue<ParallelCompactingState> parallel_compaction_;
 
   // PagedSpace free-list statistics.
@@ -864,9 +846,18 @@ class Page : public MemoryChunk {
 
   void InitializeAsAnchor(PagedSpace* owner);
 
-  bool WasSwept() { return IsFlagSet(WAS_SWEPT); }
-  void SetWasSwept() { SetFlag(WAS_SWEPT); }
-  void ClearWasSwept() { ClearFlag(WAS_SWEPT); }
+  // WaitUntilSweepingCompleted only works when concurrent sweeping is in
+  // progress. In particular, when we know that right before this call a
+  // sweeper thread was sweeping this page.
+  void WaitUntilSweepingCompleted() {
+    mutex_->Lock();
+    mutex_->Unlock();
+    DCHECK(SweepingDone());
+  }
+
+  bool SweepingDone() {
+    return concurrent_sweeping_state().Value() == kSweepingDone;
+  }
 
   void ResetFreeListStatistics();
 
@@ -1472,7 +1463,13 @@ class PageIterator BASE_EMBEDDED {
 // space.
 class AllocationInfo {
  public:
-  AllocationInfo() : top_(NULL), limit_(NULL) {}
+  AllocationInfo() : top_(nullptr), limit_(nullptr) {}
+  AllocationInfo(Address top, Address limit) : top_(top), limit_(limit) {}
+
+  void Reset(Address top, Address limit) {
+    set_top(top);
+    set_limit(limit);
+  }
 
   INLINE(void set_top(Address top)) {
     SLOW_DCHECK(top == NULL ||
@@ -1869,6 +1866,60 @@ class AllocationResult {
 STATIC_ASSERT(sizeof(AllocationResult) == kPointerSize);
 
 
+// LocalAllocationBuffer represents a linear allocation area that is created
+// from a given {AllocationResult} and can be used to allocate memory without
+// synchronization.
+//
+// The buffer is properly closed upon destruction and reassignment.
+// Example:
+//   {
+//     AllocationResult result = ...;
+//     LocalAllocationBuffer a(heap, result, size);
+//     LocalAllocationBuffer b = a;
+//     CHECK(!a.IsValid());
+//     CHECK(b.IsValid());
+//     // {a} is invalid now and cannot be used for further allocations.
+//   }
+//   // Since {b} went out of scope, the LAB is closed, resulting in creating a
+//   // filler object for the remaining area.
+class LocalAllocationBuffer {
+ public:
+  // Indicates that a buffer cannot be used for allocations anymore. Can result
+  // from either reassigning a buffer, or trying to construct it from an
+  // invalid {AllocationResult}.
+  static inline LocalAllocationBuffer InvalidBuffer();
+
+  // Creates a new LAB from a given {AllocationResult}. Results in
+  // InvalidBuffer if the result indicates a retry.
+  static inline LocalAllocationBuffer FromResult(Heap* heap,
+                                                 AllocationResult result,
+                                                 intptr_t size);
+
+  ~LocalAllocationBuffer() { Close(); }
+
+  // Convert to C++11 move-semantics once allowed by the style guide.
+  LocalAllocationBuffer(const LocalAllocationBuffer& other);
+  LocalAllocationBuffer& operator=(const LocalAllocationBuffer& other);
+
+  MUST_USE_RESULT inline AllocationResult AllocateRawAligned(
+      int size_in_bytes, AllocationAlignment alignment);
+
+  inline bool IsValid() { return allocation_info_.top() != nullptr; }
+
+  // Try to merge LABs, which is only possible when they are adjacent in memory.
+  // Returns true if the merge was successful, false otherwise.
+  inline bool TryMerge(LocalAllocationBuffer* other);
+
+ private:
+  LocalAllocationBuffer(Heap* heap, AllocationInfo allocation_info);
+
+  void Close();
+
+  Heap* heap_;
+  AllocationInfo allocation_info_;
+};
+
+
 class PagedSpace : public Space {
  public:
   static const intptr_t kCompactionMemoryWanted = 500 * KB;
@@ -1999,8 +2050,7 @@ class PagedSpace : public Space {
     DCHECK(top == limit ||
            Page::FromAddress(top) == Page::FromAddress(limit - 1));
     MemoryChunk::UpdateHighWaterMark(allocation_info_.top());
-    allocation_info_.set_top(top);
-    allocation_info_.set_limit(limit);
+    allocation_info_.Reset(top, limit);
   }
 
   // Empty space allocation info, returning unused area to free list.
@@ -2017,7 +2067,7 @@ class PagedSpace : public Space {
   void IncreaseCapacity(int size);
 
   // Releases an unused page and shrinks the space.
-  void ReleasePage(Page* page);
+  void ReleasePage(Page* page, bool evict_free_list_items);
 
   // The dummy page that anchors the linked list of pages.
   Page* anchor() { return &anchor_; }
@@ -2044,22 +2094,11 @@ class PagedSpace : public Space {
   static void ResetCodeStatistics(Isolate* isolate);
 #endif
 
-  // Evacuation candidates are swept by evacuator.  Needs to return a valid
-  // result before _and_ after evacuation has finished.
-  static bool ShouldBeSweptBySweeperThreads(Page* p) {
-    return !p->IsEvacuationCandidate() &&
-           !p->IsFlagSet(Page::RESCAN_ON_EVACUATION) && !p->WasSwept();
-  }
-
   // This function tries to steal size_in_bytes memory from the sweeper threads
   // free-lists. If it does not succeed stealing enough memory, it will wait
   // for the sweeper threads to finish sweeping.
   // It returns true when sweeping is completed and false otherwise.
   bool EnsureSweeperProgress(intptr_t size_in_bytes);
-
-  void set_end_of_unswept_pages(Page* page) { end_of_unswept_pages_ = page; }
-
-  Page* end_of_unswept_pages() { return end_of_unswept_pages_; }
 
   Page* FirstPage() { return anchor_.next_page(); }
   Page* LastPage() { return anchor_.prev_page(); }
@@ -2080,17 +2119,12 @@ class PagedSpace : public Space {
   // e.g., removes its bump pointer area and resets statistics.
   void MergeCompactionSpace(CompactionSpace* other);
 
-  void DivideUponCompactionSpaces(CompactionSpaceCollection** other, int num,
-                                  intptr_t limit = kCompactionMemoryWanted);
-
   // Refills the free list from the corresponding free list filled by the
   // sweeper.
   virtual void RefillFreeList();
 
  protected:
   void AddMemory(Address start, intptr_t size);
-
-  FreeSpace* TryRemoveMemory(intptr_t size_in_bytes);
 
   void MoveOverFreeMemory(PagedSpace* other);
 
@@ -2144,11 +2178,6 @@ class PagedSpace : public Space {
   // Normal allocation information.
   AllocationInfo allocation_info_;
 
-  // The sweeper threads iterate over the list of pointer and data space pages
-  // and sweep these pages concurrently. They will stop sweeping after the
-  // end_of_unswept_pages_ page.
-  Page* end_of_unswept_pages_;
-
   // Mutex guarding any concurrent access to the space.
   base::Mutex space_mutex_;
 
@@ -2196,9 +2225,6 @@ class HistogramInfo : public NumberAndSizeInfo {
 
 
 enum SemiSpaceId { kFromSpace = 0, kToSpace = 1 };
-
-
-class SemiSpace;
 
 
 class NewSpacePage : public MemoryChunk {
@@ -2281,31 +2307,39 @@ class NewSpacePage : public MemoryChunk {
 // -----------------------------------------------------------------------------
 // SemiSpace in young generation
 //
-// A semispace is a contiguous chunk of memory holding page-like memory
-// chunks. The mark-compact collector  uses the memory of the first page in
-// the from space as a marking stack when tracing live objects.
-
+// A SemiSpace is a contiguous chunk of memory holding page-like memory chunks.
+// The mark-compact collector  uses the memory of the first page in the from
+// space as a marking stack when tracing live objects.
 class SemiSpace : public Space {
  public:
-  // Constructor.
+  static void Swap(SemiSpace* from, SemiSpace* to);
+
   SemiSpace(Heap* heap, SemiSpaceId semispace)
       : Space(heap, NEW_SPACE, NOT_EXECUTABLE),
-        start_(NULL),
-        age_mark_(NULL),
+        current_capacity_(0),
+        maximum_capacity_(0),
+        minimum_capacity_(0),
+        start_(nullptr),
+        age_mark_(nullptr),
+        address_mask_(0),
+        object_mask_(0),
+        object_expected_(0),
+        committed_(false),
         id_(semispace),
         anchor_(this),
-        current_page_(NULL) {}
+        current_page_(nullptr) {}
 
-  // Sets up the semispace using the given chunk.
-  void SetUp(Address start, int initial_capacity, int target_capacity,
-             int maximum_capacity);
+  // Creates a space in the young generation. The constructor does not
+  // allocate memory from the OS.  A SemiSpace is given a contiguous chunk of
+  // memory of size {initial_capacity} when set up.
+  void SetUp(Address start, int initial_capacity, int maximum_capacity);
 
   // Tear down the space.  Heap memory was not allocated by the space, so it
   // is not deallocated here.
   void TearDown();
 
   // True if the space has been set up but not torn down.
-  bool HasBeenSetUp() { return start_ != NULL; }
+  bool HasBeenSetUp() { return start_ != nullptr; }
 
   // Grow the semispace to the new capacity.  The new capacity
   // requested must be larger than the current capacity and less than
@@ -2317,12 +2351,9 @@ class SemiSpace : public Space {
   // semispace and less than the current capacity.
   bool ShrinkTo(int new_capacity);
 
-  // Sets the total capacity. Only possible when the space is not committed.
-  bool SetTotalCapacity(int new_capacity);
-
   // Returns the start address of the first page of the space.
   Address space_start() {
-    DCHECK(anchor_.next_page() != &anchor_);
+    DCHECK_NE(anchor_.next_page(), &anchor_);
     return anchor_.next_page()->area_start();
   }
 
@@ -2362,6 +2393,27 @@ class SemiSpace : public Space {
     return (reinterpret_cast<uintptr_t>(o) & object_mask_) == object_expected_;
   }
 
+  bool is_committed() { return committed_; }
+  bool Commit();
+  bool Uncommit();
+
+  NewSpacePage* first_page() { return anchor_.next_page(); }
+  NewSpacePage* current_page() { return current_page_; }
+
+  // Returns the current total capacity of the semispace.
+  int current_capacity() { return current_capacity_; }
+
+  // Returns the maximum total capacity of the semispace.
+  int maximum_capacity() { return maximum_capacity_; }
+
+  // Returns the initial capacity of the semispace.
+  int minimum_capacity() { return minimum_capacity_; }
+
+  SemiSpaceId id() { return id_; }
+
+  // Approximate amount of physical memory committed for this space.
+  size_t CommittedPhysicalMemory() override;
+
   // If we don't have these here then SemiSpace will be abstract.  However
   // they should never be called:
 
@@ -2377,18 +2429,6 @@ class SemiSpace : public Space {
     return 0;
   }
 
-
-  bool is_committed() { return committed_; }
-  bool Commit();
-  bool Uncommit();
-
-  NewSpacePage* first_page() { return anchor_.next_page(); }
-  NewSpacePage* current_page() { return current_page_; }
-
-#ifdef VERIFY_HEAP
-  virtual void Verify();
-#endif
-
 #ifdef DEBUG
   void Print() override;
   // Validate a range of of addresses in a SemiSpace.
@@ -2400,40 +2440,29 @@ class SemiSpace : public Space {
   inline static void AssertValidRange(Address from, Address to) {}
 #endif
 
-  // Returns the current total capacity of the semispace.
-  int TotalCapacity() { return total_capacity_; }
-
-  // Returns the target for total capacity of the semispace.
-  int TargetCapacity() { return target_capacity_; }
-
-  // Returns the maximum total capacity of the semispace.
-  int MaximumTotalCapacity() { return maximum_total_capacity_; }
-
-  // Returns the initial capacity of the semispace.
-  int InitialTotalCapacity() { return initial_total_capacity_; }
-
-  SemiSpaceId id() { return id_; }
-
-  static void Swap(SemiSpace* from, SemiSpace* to);
-
-  // Approximate amount of physical memory committed for this space.
-  size_t CommittedPhysicalMemory() override;
+#ifdef VERIFY_HEAP
+  virtual void Verify();
+#endif
 
  private:
-  // Flips the semispace between being from-space and to-space.
-  // Copies the flags into the masked positions on all pages in the space.
-  void FlipPages(intptr_t flags, intptr_t flag_mask);
-
-  // Updates Capacity and MaximumCommitted based on new capacity.
-  void SetCapacity(int new_capacity);
-
   NewSpacePage* anchor() { return &anchor_; }
 
-  // The current and maximum total capacity of the space.
-  int total_capacity_;
-  int target_capacity_;
-  int maximum_total_capacity_;
-  int initial_total_capacity_;
+  void set_current_capacity(int new_capacity) {
+    current_capacity_ = new_capacity;
+  }
+
+  // Flips the semispace between being from-space and to-space. Copies the flags
+  // into the masked positions on all pages in the space.
+  void FlipPages(intptr_t flags, intptr_t flag_mask);
+
+  // The currently committed space capacity.
+  int current_capacity_;
+
+  // The maximum capacity that can be used by this space.
+  int maximum_capacity_;
+
+  // The mimnimum capacity for the space. A space cannot shrink below this size.
+  int minimum_capacity_;
 
   // The start address of the space.
   Address start_;
@@ -2508,54 +2537,6 @@ class NewSpacePageIterator BASE_EMBEDDED {
   NewSpacePage* last_page_;
 };
 
-// -----------------------------------------------------------------------------
-// Allows observation of inline allocation in the new space.
-class InlineAllocationObserver {
- public:
-  explicit InlineAllocationObserver(intptr_t step_size)
-      : step_size_(step_size), bytes_to_next_step_(step_size) {
-    DCHECK(step_size >= kPointerSize);
-  }
-  virtual ~InlineAllocationObserver() {}
-
- private:
-  intptr_t step_size() const { return step_size_; }
-  intptr_t bytes_to_next_step() const { return bytes_to_next_step_; }
-
-  // Pure virtual method provided by the subclasses that gets called when at
-  // least step_size bytes have been allocated. soon_object is the address just
-  // allocated (but not yet initialized.) size is the size of the object as
-  // requested (i.e. w/o the alignment fillers). Some complexities to be aware
-  // of:
-  // 1) soon_object will be nullptr in cases where we end up observing an
-  //    allocation that happens to be a filler space (e.g. page boundaries.)
-  // 2) size is the requested size at the time of allocation. Right-trimming
-  //    may change the object size dynamically.
-  // 3) soon_object may actually be the first object in an allocation-folding
-  //    group. In such a case size is the size of the group rather than the
-  //    first object.
-  virtual void Step(int bytes_allocated, Address soon_object, size_t size) = 0;
-
-  // Called each time the new space does an inline allocation step. This may be
-  // more frequently than the step_size we are monitoring (e.g. when there are
-  // multiple observers, or when page or space boundary is encountered.)
-  void InlineAllocationStep(int bytes_allocated, Address soon_object,
-                            size_t size) {
-    bytes_to_next_step_ -= bytes_allocated;
-    if (bytes_to_next_step_ <= 0) {
-      Step(static_cast<int>(step_size_ - bytes_to_next_step_), soon_object,
-           size);
-      bytes_to_next_step_ = step_size_;
-    }
-  }
-
-  intptr_t step_size_;
-  intptr_t bytes_to_next_step_;
-
-  friend class NewSpace;
-
-  DISALLOW_COPY_AND_ASSIGN(InlineAllocationObserver);
-};
 
 // -----------------------------------------------------------------------------
 // The young generation space.
@@ -2593,9 +2574,6 @@ class NewSpace : public Space {
   // their maximum capacity.
   void Grow();
 
-  // Grow the capacity of the semispaces by one page.
-  bool GrowOnePage();
-
   // Shrink the capacity of the semispaces.
   void Shrink();
 
@@ -2624,16 +2602,16 @@ class NewSpace : public Space {
 
   // Return the allocatable capacity of a semispace.
   intptr_t Capacity() {
-    SLOW_DCHECK(to_space_.TotalCapacity() == from_space_.TotalCapacity());
-    return (to_space_.TotalCapacity() / Page::kPageSize) *
+    SLOW_DCHECK(to_space_.current_capacity() == from_space_.current_capacity());
+    return (to_space_.current_capacity() / Page::kPageSize) *
            NewSpacePage::kAreaSize;
   }
 
   // Return the current size of a semispace, allocatable and non-allocatable
   // memory.
   intptr_t TotalCapacity() {
-    DCHECK(to_space_.TotalCapacity() == from_space_.TotalCapacity());
-    return to_space_.TotalCapacity();
+    DCHECK(to_space_.current_capacity() == from_space_.current_capacity());
+    return to_space_.current_capacity();
   }
 
   // Committed memory for NewSpace is the committed memory of both semi-spaces
@@ -2674,18 +2652,16 @@ class NewSpace : public Space {
 
   // Return the maximum capacity of a semispace.
   int MaximumCapacity() {
-    DCHECK(to_space_.MaximumTotalCapacity() ==
-           from_space_.MaximumTotalCapacity());
-    return to_space_.MaximumTotalCapacity();
+    DCHECK(to_space_.maximum_capacity() == from_space_.maximum_capacity());
+    return to_space_.maximum_capacity();
   }
 
   bool IsAtMaximumCapacity() { return TotalCapacity() == MaximumCapacity(); }
 
   // Returns the initial capacity of a semispace.
   int InitialTotalCapacity() {
-    DCHECK(to_space_.InitialTotalCapacity() ==
-           from_space_.InitialTotalCapacity());
-    return to_space_.InitialTotalCapacity();
+    DCHECK(to_space_.minimum_capacity() == from_space_.minimum_capacity());
+    return to_space_.minimum_capacity();
   }
 
   // Return the address of the allocation pointer in the active semispace.
@@ -2741,6 +2717,9 @@ class NewSpace : public Space {
   MUST_USE_RESULT INLINE(AllocationResult AllocateRaw(
       int size_in_bytes, AllocationAlignment alignment));
 
+  MUST_USE_RESULT inline AllocationResult AllocateRawSynchronized(
+      int size_in_bytes, AllocationAlignment alignment);
+
   // Reset the allocation pointer to the beginning of the active semispace.
   void ResetAllocationInfo();
 
@@ -2790,6 +2769,7 @@ class NewSpace : public Space {
   // are no pages, or the current page is already empty), or true
   // if successful.
   bool AddFreshPage();
+  bool AddFreshPageSynchronized();
 
 #ifdef VERIFY_HEAP
   // Verify the active semispace.
@@ -2832,6 +2812,8 @@ class NewSpace : public Space {
  private:
   // Update allocation info to match the current to-space page.
   void UpdateAllocationInfo();
+
+  base::Mutex mutex_;
 
   Address chunk_base_;
   uintptr_t chunk_size_;
@@ -2906,12 +2888,6 @@ class CompactionSpace : public PagedSpace {
   CompactionSpace(Heap* heap, AllocationSpace id, Executability executable)
       : PagedSpace(heap, id, executable) {}
 
-  // Adds external memory starting at {start} of {size_in_bytes} to the space.
-  void AddExternalMemory(Address start, int size_in_bytes) {
-    IncreaseCapacity(size_in_bytes);
-    Free(start, size_in_bytes);
-  }
-
   bool is_local() override { return true; }
 
   void RefillFreeList() override;
@@ -2930,9 +2906,7 @@ class CompactionSpaceCollection : public Malloced {
  public:
   explicit CompactionSpaceCollection(Heap* heap)
       : old_space_(heap, OLD_SPACE, Executability::NOT_EXECUTABLE),
-        code_space_(heap, CODE_SPACE, Executability::EXECUTABLE),
-        duration_(0.0),
-        bytes_compacted_(0) {}
+        code_space_(heap, CODE_SPACE, Executability::EXECUTABLE) {}
 
   CompactionSpace* Get(AllocationSpace space) {
     switch (space) {
@@ -2947,21 +2921,9 @@ class CompactionSpaceCollection : public Malloced {
     return nullptr;
   }
 
-  void ReportCompactionProgress(double duration, intptr_t bytes_compacted) {
-    duration_ += duration;
-    bytes_compacted_ += bytes_compacted;
-  }
-
-  double duration() const { return duration_; }
-  intptr_t bytes_compacted() const { return bytes_compacted_; }
-
  private:
   CompactionSpace old_space_;
   CompactionSpace code_space_;
-
-  // Book keeping.
-  double duration_;
-  intptr_t bytes_compacted_;
 };
 
 

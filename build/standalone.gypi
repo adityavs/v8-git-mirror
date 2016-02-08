@@ -42,8 +42,7 @@
     'v8_enable_backtrace%': 0,
     'v8_enable_i18n_support%': 1,
     'v8_deprecation_warnings': 1,
-    # TODO(jochen): Turn this on.
-    'v8_imminent_deprecation_warnings%': 0,
+    'v8_imminent_deprecation_warnings': 1,
     'msvs_multi_core_compile%': '1',
     'mac_deployment_target%': '10.5',
     'release_extra_cflags%': '',
@@ -68,11 +67,15 @@
         'host_arch%': '<(host_arch)',
         'target_arch%': '<(host_arch)',
         'base_dir%': '<!(cd <(DEPTH) && python -c "import os; print os.getcwd()")',
+
+        # Instrument for code coverage with gcov.
+        'coverage%': 0,
       },
       'base_dir%': '<(base_dir)',
       'host_arch%': '<(host_arch)',
       'target_arch%': '<(target_arch)',
       'v8_target_arch%': '<(target_arch)',
+      'coverage%': '<(coverage)',
       'asan%': 0,
       'lsan%': 0,
       'msan%': 0,
@@ -106,6 +109,7 @@
       # If no gomadir is set, it uses the default gomadir.
       'use_goma%': 0,
       'gomadir%': '',
+
       'conditions': [
         # Set default gomadir.
         ['OS=="win"', {
@@ -113,10 +117,11 @@
         }, {
           'gomadir': '<!(/bin/echo -n ${HOME}/goma)',
         }],
-        ['host_arch!="ppc" and host_arch!="ppc64" and host_arch!="ppc64le"', {
-          'host_clang%': '1',
+        ['host_arch!="ppc" and host_arch!="ppc64" and host_arch!="ppc64le" and host_arch!="s390" and host_arch!="s390x" and \
+          coverage==0', {
+          'host_clang%': 1,
         }, {
-          'host_clang%': '0',
+          'host_clang%': 0,
         }],
         # linux_use_bundled_gold: whether to use the gold linker binary checked
         # into third_party/binutils.  Force this off via GYP_DEFINES when you
@@ -160,6 +165,7 @@
     'cfi_blacklist%': '<(cfi_blacklist)',
     'test_isolation_mode%': '<(test_isolation_mode)',
     'fastbuild%': '<(fastbuild)',
+    'coverage%': '<(coverage)',
 
     # Add a simple extras solely for the purpose of the cctests
     'v8_extra_library_files': ['../test/cctest/test-extra.js'],
@@ -188,6 +194,9 @@
     # Embedders that don't use standalone.gypi will need to add
     # their own default value.
     'v8_use_external_startup_data%': 1,
+
+    # Use a separate ignition snapshot file in standalone builds.
+    'v8_separate_ignition_snapshot': 1,
 
     # Relative path to icu.gyp from this file.
     'icu_gyp_path': '../third_party/icu/icu.gyp',
@@ -221,7 +230,7 @@
         'v8_enable_gdbjit%': 0,
       }],
       ['(OS=="linux" or OS=="mac") and (target_arch=="ia32" or target_arch=="x64") and \
-        (v8_target_arch!="x87" and v8_target_arch!="x32")', {
+        (v8_target_arch!="x87" and v8_target_arch!="x32") and coverage==0', {
         'clang%': 1,
       }, {
         'clang%': 0,
@@ -409,7 +418,7 @@
       ['clang==0', {
         'cflags+': ['-Wno-sign-compare',],
       }],
-      ['(clang==1 or host_clang==1) and OS!="win"', {
+      ['clang==1 or host_clang==1', {
         # This is here so that all files get recompiled after a clang roll and
         # when turning clang on or off.
         # (defines are passed via the command line, and build systems rebuild
@@ -680,6 +689,7 @@
           '-pedantic',
           # Don't warn about the "struct foo f = {0};" initialization pattern.
           '-Wno-missing-field-initializers',
+          '-Wno-gnu-zero-variadic-macro-arguments',
         ],
         'cflags_cc': [
           '-Wnon-virtual-dtor',
@@ -689,6 +699,16 @@
         ],
         'ldflags': [ '-pthread', ],
         'conditions': [
+          # Don't warn about TRACE_EVENT_* macros with zero arguments passed to
+          # ##__VA_ARGS__. C99 strict mode prohibits having zero variadic macro
+          # arguments in gcc.
+          [ 'clang==0', {
+            'cflags!' : [
+              '-pedantic' ,
+              # Don't warn about unrecognized command line option.
+              '-Wno-gnu-zero-variadic-macro-arguments',
+            ],
+          }],
           [ 'clang==1 and (v8_target_arch=="x64" or v8_target_arch=="arm64" \
             or v8_target_arch=="mips64el")', {
             'cflags': [ '-Wshorten-64-to-32' ],
@@ -701,6 +721,11 @@
           }],
           [ 'component=="shared_library"', {
             'cflags': [ '-fPIC', ],
+          }],
+          [ 'coverage==1', {
+            'cflags!': [ '-O3', '-O2', '-O1', ],
+            'cflags': [ '-fprofile-arcs', '-ftest-coverage', '-O0'],
+            'ldflags': [ '-fprofile-arcs'],
           }],
         ],
       },
@@ -715,6 +740,7 @@
           '-Wno-unused-parameter',
           # Don't warn about the "struct foo f = {0};" initialization pattern.
           '-Wno-missing-field-initializers',
+          '-Wno-gnu-zero-variadic-macro-arguments',
         ],
         'cflags_cc': [
           '-Wnon-virtual-dtor',
@@ -822,7 +848,6 @@
           4309, # Truncation of constant value
           4311, # Pointer truncation from 'type' to 'type'
           4312, # Conversion from 'type1' to 'type2' of greater size
-          4481, # Nonstandard extension used: override specifier 'keyword'
           4505, # Unreferenced local function has been removed
           4510, # Default constructor could not be generated
           4512, # Assignment operator could not be generated
@@ -939,6 +964,7 @@
             '-Wno-unused-parameter',
             # Don't warn about the "struct foo f = {0};" initialization pattern.
             '-Wno-missing-field-initializers',
+            '-Wno-gnu-zero-variadic-macro-arguments',
           ],
         },
         'conditions': [

@@ -46,23 +46,35 @@
 #include "src/assembler.h"
 #include "src/ppc/constants-ppc.h"
 
-#define ABI_USES_FUNCTION_DESCRIPTORS \
-  (V8_HOST_ARCH_PPC && (V8_OS_AIX ||    \
-                      (V8_TARGET_ARCH_PPC64 && V8_TARGET_BIG_ENDIAN)))
-
-#define ABI_PASSES_HANDLES_IN_REGS \
-  (!V8_HOST_ARCH_PPC || V8_OS_AIX || V8_TARGET_ARCH_PPC64)
-
-#define ABI_RETURNS_OBJECT_PAIRS_IN_REGS \
-  (!V8_HOST_ARCH_PPC || !V8_TARGET_ARCH_PPC64 || V8_TARGET_LITTLE_ENDIAN)
-
-#define ABI_TOC_ADDRESSABILITY_VIA_IP \
-  (V8_HOST_ARCH_PPC && V8_TARGET_ARCH_PPC64 && V8_TARGET_LITTLE_ENDIAN)
+#if V8_HOST_ARCH_PPC && \
+    (V8_OS_AIX || (V8_TARGET_ARCH_PPC64 && V8_TARGET_BIG_ENDIAN))
+#define ABI_USES_FUNCTION_DESCRIPTORS 1
+#else
+#define ABI_USES_FUNCTION_DESCRIPTORS 0
+#endif
 
 #if !V8_HOST_ARCH_PPC || V8_OS_AIX || V8_TARGET_ARCH_PPC64
-#define ABI_TOC_REGISTER Register::kCode_r2
+#define ABI_PASSES_HANDLES_IN_REGS 1
 #else
-#define ABI_TOC_REGISTER Register::kCode_r13
+#define ABI_PASSES_HANDLES_IN_REGS 0
+#endif
+
+#if !V8_HOST_ARCH_PPC || !V8_TARGET_ARCH_PPC64 || V8_TARGET_LITTLE_ENDIAN
+#define ABI_RETURNS_OBJECT_PAIRS_IN_REGS 1
+#else
+#define ABI_RETURNS_OBJECT_PAIRS_IN_REGS 0
+#endif
+
+#if !V8_HOST_ARCH_PPC || (V8_TARGET_ARCH_PPC64 && V8_TARGET_LITTLE_ENDIAN)
+#define ABI_CALL_VIA_IP 1
+#else
+#define ABI_CALL_VIA_IP 0
+#endif
+
+#if !V8_HOST_ARCH_PPC || V8_OS_AIX || V8_TARGET_ARCH_PPC64
+#define ABI_TOC_REGISTER 2
+#else
+#define ABI_TOC_REGISTER 13
 #endif
 
 #define INSTR_AND_DATA_CACHE_COHERENCY LWSYNC
@@ -984,7 +996,7 @@ class Assembler : public AssemblerBase {
   void mtlr(Register src);
   void mtctr(Register src);
   void mtxer(Register src);
-  void mcrfs(int bf, int bfa);
+  void mcrfs(CRegister cr, FPSCRBit bit);
   void mfcr(Register dst);
 #if V8_TARGET_ARCH_PPC64
   void mffprd(Register dst, DoubleRegister src);
@@ -1071,6 +1083,8 @@ class Assembler : public AssemblerBase {
             RCBit rc = LeaveRC);
   void fneg(const DoubleRegister frt, const DoubleRegister frb,
             RCBit rc = LeaveRC);
+  void mtfsb0(FPSCRBit bit, RCBit rc = LeaveRC);
+  void mtfsb1(FPSCRBit bit, RCBit rc = LeaveRC);
   void mtfsfi(int bf, int immediate, RCBit rc = LeaveRC);
   void mffs(const DoubleRegister frt, RCBit rc = LeaveRC);
   void mtfsf(const DoubleRegister frb, bool L = 1, int FLM = 0, bool W = 0,
@@ -1198,7 +1212,7 @@ class Assembler : public AssemblerBase {
 
   // Record a deoptimization reason that can be used by a log or cpu profiler.
   // Use --trace-deopt to enable.
-  void RecordDeoptReason(const int reason, const SourcePosition position);
+  void RecordDeoptReason(const int reason, int raw_position);
 
   // Writes a single byte or word of data in the code stream.  Used
   // for inline tables, e.g., jump-tables.

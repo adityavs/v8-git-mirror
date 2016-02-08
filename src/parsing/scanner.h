@@ -28,17 +28,6 @@ class ParserRecorder;
 class UnicodeCache;
 
 
-// Returns the value (0 .. 15) of a hexadecimal character c.
-// If c is not a legal hexadecimal character, returns a value < 0.
-inline int HexValue(uc32 c) {
-  c -= '0';
-  if (static_cast<unsigned>(c) <= 9) return c;
-  c = (c | 0x20) - ('a' - '0');  // detect 0x11..0x16 and 0x31..0x36.
-  if (static_cast<unsigned>(c) <= 5) return c + 10;
-  return -1;
-}
-
-
 // ---------------------------------------------------------------------
 // Buffered stream of UTF-16 code units, using an internal UTF-16 buffer.
 // A code unit is a 16 bit value representing either a 16 bit code point
@@ -459,6 +448,8 @@ class Scanner {
 
   bool IdentifierIsFutureStrictReserved(const AstRawString* string) const;
 
+  bool FoundHtmlComment() const { return found_html_comment_; }
+
  private:
   // The current and look-ahead token.
   struct TokenDesc {
@@ -484,6 +475,7 @@ class Scanner {
     current_.literal_chars = NULL;
     current_.raw_literal_chars = NULL;
     next_next_.token = Token::UNINITIALIZED;
+    found_html_comment_ = false;
   }
 
   // Support BookmarkScope functionality.
@@ -763,6 +755,9 @@ class Scanner {
   // Whether there is a multi-line comment that contains a
   // line-terminator after the current token, and before the next.
   bool has_multiline_comment_before_next_;
+
+  // Whether this scanner encountered an HTML comment.
+  bool found_html_comment_;
 };
 
 }  // namespace internal

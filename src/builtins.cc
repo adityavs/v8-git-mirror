@@ -9,6 +9,7 @@
 #include "src/arguments.h"
 #include "src/base/once.h"
 #include "src/bootstrapper.h"
+#include "src/dateparser-inl.h"
 #include "src/elements.h"
 #include "src/frames-inl.h"
 #include "src/gdb-jit.h"
@@ -19,6 +20,7 @@
 #include "src/profiler/cpu-profiler.h"
 #include "src/property-descriptor.h"
 #include "src/prototype.h"
+#include "src/string-builder.h"
 #include "src/vm-state-inl.h"
 
 namespace v8 {
@@ -44,6 +46,13 @@ class BuiltinArguments : public Arguments {
   template <class S> Handle<S> at(int index) {
     DCHECK(index < length());
     return Arguments::at<S>(index);
+  }
+
+  Handle<Object> atOrUndefined(Isolate* isolate, int index) {
+    if (index >= length()) {
+      return isolate->factory()->undefined_value();
+    }
+    return at<Object>(index);
   }
 
   Handle<Object> receiver() {
@@ -125,19 +134,30 @@ BUILTIN_LIST_C(DEF_ARG_TYPE)
 // In the body of the builtin function the arguments can be accessed
 // through the BuiltinArguments object args.
 
-#define BUILTIN(name)                                            \
-  MUST_USE_RESULT static Object* Builtin_Impl_##name(            \
-      name##ArgumentsType args, Isolate* isolate);               \
-  MUST_USE_RESULT static Object* Builtin_##name(                 \
-      int args_length, Object** args_object, Isolate* isolate) { \
-    name##ArgumentsType args(args_length, args_object);          \
-    return Builtin_Impl_##name(args, isolate);                   \
-  }                                                              \
-  MUST_USE_RESULT static Object* Builtin_Impl_##name(            \
-      name##ArgumentsType args, Isolate* isolate)
-
+#define BUILTIN(name)                                                          \
+  MUST_USE_RESULT static Object* Builtin_Impl_##name(name##ArgumentsType args, \
+                                                     Isolate* isolate);        \
+  MUST_USE_RESULT static Object* Builtin_##name(                               \
+      int args_length, Object** args_object, Isolate* isolate) {               \
+    name##ArgumentsType args(args_length, args_object);                        \
+    isolate->counters()->runtime_calls()->Increment();                         \
+    return Builtin_Impl_##name(args, isolate);                                 \
+  }                                                                            \
+  MUST_USE_RESULT static Object* Builtin_Impl_##name(name##ArgumentsType args, \
+                                                     Isolate* isolate)
 
 // ----------------------------------------------------------------------------
+
+
+#define CHECK_RECEIVER(Type, name, method)                                  \
+  if (!args.receiver()->Is##Type()) {                                       \
+    THROW_NEW_ERROR_RETURN_FAILURE(                                         \
+        isolate,                                                            \
+        NewTypeError(MessageTemplate::kIncompatibleMethodReceiver,          \
+                     isolate->factory()->NewStringFromAsciiChecked(method), \
+                     args.receiver()));                                     \
+  }                                                                         \
+  Handle<Type> name = Handle<Type>::cast(args.receiver())
 
 
 inline bool ClampedToInteger(Object* object, int* out) {
@@ -438,6 +458,14 @@ BUILTIN(ArraySlice) {
   int relative_end = 0;
   bool is_sloppy_arguments = false;
 
+  // TODO(littledan): Look up @@species only once, not once here and
+  // again in the JS builtin. Pass the species out?
+  Handle<Object> species;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, species, Object::ArraySpeciesConstructor(isolate, receiver));
+  if (*species != isolate->context()->native_context()->array_function()) {
+    return CallJsIntrinsic(isolate, isolate->array_slice(), args);
+  }
   if (receiver->IsJSArray()) {
     DisallowHeapAllocation no_gc;
     JSArray* array = JSArray::cast(*receiver);
@@ -523,6 +551,14 @@ BUILTIN(ArraySplice) {
   if (!maybe_elms_obj.ToHandle(&elms_obj)) {
     return CallJsIntrinsic(isolate, isolate->array_splice(), args);
   }
+  // TODO(littledan): Look up @@species only once, not once here and
+  // again in the JS builtin. Pass the species out?
+  Handle<Object> species;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, species, Object::ArraySpeciesConstructor(isolate, receiver));
+  if (*species != isolate->context()->native_context()->array_function()) {
+    return CallJsIntrinsic(isolate, isolate->array_splice(), args);
+  }
   Handle<JSArray> array = Handle<JSArray>::cast(receiver);
   DCHECK(!array->map()->is_observed());
 
@@ -591,28 +627,42 @@ namespace {
  */
 class ArrayConcatVisitor {
  public:
-  ArrayConcatVisitor(Isolate* isolate, Handle<FixedArray> storage,
+  ArrayConcatVisitor(Isolate* isolate, Handle<Object> storage,
                      bool fast_elements)
       : isolate_(isolate),
-        storage_(Handle<FixedArray>::cast(
-            isolate->global_handles()->Create(*storage))),
+        storage_(isolate->global_handles()->Create(*storage)),
         index_offset_(0u),
         bit_field_(FastElementsField::encode(fast_elements) |
-                   ExceedsLimitField::encode(false)) {}
+                   ExceedsLimitField::encode(false) |
+                   IsFixedArrayField::encode(storage->IsFixedArray())) {
+    DCHECK(!(this->fast_elements() && !is_fixed_array()));
+  }
 
   ~ArrayConcatVisitor() { clear_storage(); }
 
-  void visit(uint32_t i, Handle<Object> elm) {
-    if (i >= JSObject::kMaxElementCount - index_offset_) {
-      set_exceeds_array_limit(true);
-      return;
-    }
+  bool visit(uint32_t i, Handle<Object> elm) {
     uint32_t index = index_offset_ + i;
 
+    if (!is_fixed_array()) {
+      Handle<Object> element_value;
+      ASSIGN_RETURN_ON_EXCEPTION_VALUE(
+          isolate_, element_value,
+          Object::SetElement(isolate_, storage_, index, elm, STRICT), false);
+      return true;
+    }
+
+    if (i >= JSObject::kMaxElementCount - index_offset_) {
+      set_exceeds_array_limit(true);
+      // Exception hasn't been thrown at this point. Return true to
+      // break out, and caller will throw. !visit would imply that
+      // there is already a pending exception.
+      return true;
+    }
+
     if (fast_elements()) {
-      if (index < static_cast<uint32_t>(storage_->length())) {
-        storage_->set(index, *elm);
-        return;
+      if (index < static_cast<uint32_t>(storage_fixed_array()->length())) {
+        storage_fixed_array()->set(index, *elm);
+        return true;
       }
       // Our initial estimate of length was foiled, possibly by
       // getters on the arrays increasing the length of later arrays
@@ -633,6 +683,7 @@ class ArrayConcatVisitor {
       clear_storage();
       set_storage(*result);
     }
+    return true;
   }
 
   void increase_index_offset(uint32_t delta) {
@@ -656,6 +707,7 @@ class ArrayConcatVisitor {
   }
 
   Handle<JSArray> ToArray() {
+    DCHECK(is_fixed_array());
     Handle<JSArray> array = isolate_->factory()->NewJSArray(0);
     Handle<Object> length =
         isolate_->factory()->NewNumber(static_cast<double>(index_offset_));
@@ -663,15 +715,26 @@ class ArrayConcatVisitor {
         array, fast_elements() ? FAST_HOLEY_ELEMENTS : DICTIONARY_ELEMENTS);
     array->set_map(*map);
     array->set_length(*length);
-    array->set_elements(*storage_);
+    array->set_elements(*storage_fixed_array());
     return array;
+  }
+
+  // Storage is either a FixedArray (if is_fixed_array()) or a JSReciever
+  // (otherwise)
+  Handle<FixedArray> storage_fixed_array() {
+    DCHECK(is_fixed_array());
+    return Handle<FixedArray>::cast(storage_);
+  }
+  Handle<JSReceiver> storage_jsreceiver() {
+    DCHECK(!is_fixed_array());
+    return Handle<JSReceiver>::cast(storage_);
   }
 
  private:
   // Convert storage to dictionary mode.
   void SetDictionaryMode() {
-    DCHECK(fast_elements());
-    Handle<FixedArray> current_storage(*storage_);
+    DCHECK(fast_elements() && is_fixed_array());
+    Handle<FixedArray> current_storage = storage_fixed_array();
     Handle<SeededNumberDictionary> slow_storage(
         SeededNumberDictionary::New(isolate_, current_storage->length()));
     uint32_t current_length = static_cast<uint32_t>(current_storage->length());
@@ -699,12 +762,13 @@ class ArrayConcatVisitor {
   }
 
   inline void set_storage(FixedArray* storage) {
-    storage_ =
-        Handle<FixedArray>::cast(isolate_->global_handles()->Create(storage));
+    DCHECK(is_fixed_array());
+    storage_ = isolate_->global_handles()->Create(storage);
   }
 
   class FastElementsField : public BitField<bool, 0, 1> {};
   class ExceedsLimitField : public BitField<bool, 1, 1> {};
+  class IsFixedArrayField : public BitField<bool, 2, 1> {};
 
   bool fast_elements() const { return FastElementsField::decode(bit_field_); }
   void set_fast_elements(bool fast) {
@@ -713,9 +777,10 @@ class ArrayConcatVisitor {
   void set_exceeds_array_limit(bool exceeds) {
     bit_field_ = ExceedsLimitField::update(bit_field_, exceeds);
   }
+  bool is_fixed_array() const { return IsFixedArrayField::decode(bit_field_); }
 
   Isolate* isolate_;
-  Handle<FixedArray> storage_;  // Always a global handle.
+  Handle<Object> storage_;  // Always a global handle.
   // Index after last seen index. Always less than or equal to
   // JSObject::kMaxElementCount.
   uint32_t index_offset_;
@@ -770,14 +835,20 @@ uint32_t EstimateElementCount(Handle<JSArray> array) {
       }
       break;
     }
-    case FAST_SLOPPY_ARGUMENTS_ELEMENTS:
-    case SLOW_SLOPPY_ARGUMENTS_ELEMENTS:
 #define TYPED_ARRAY_CASE(Type, type, TYPE, ctype, size) case TYPE##_ELEMENTS:
 
       TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
       // External arrays are always dense.
       return length;
+    case NO_ELEMENTS:
+      return 0;
+    case FAST_SLOPPY_ARGUMENTS_ELEMENTS:
+    case SLOW_SLOPPY_ARGUMENTS_ELEMENTS:
+    case FAST_STRING_WRAPPER_ELEMENTS:
+    case SLOW_STRING_WRAPPER_ELEMENTS:
+      UNREACHABLE();
+      return 0;
   }
   // As an estimate, we assume that the prototype doesn't contain any
   // inherited elements.
@@ -786,7 +857,7 @@ uint32_t EstimateElementCount(Handle<JSArray> array) {
 
 
 template <class ExternalArrayClass, class ElementType>
-void IterateTypedArrayElements(Isolate* isolate, Handle<JSObject> receiver,
+bool IterateTypedArrayElements(Isolate* isolate, Handle<JSObject> receiver,
                                bool elements_are_ints,
                                bool elements_are_guaranteed_smis,
                                ArrayConcatVisitor* visitor) {
@@ -801,7 +872,7 @@ void IterateTypedArrayElements(Isolate* isolate, Handle<JSObject> receiver,
         HandleScope loop_scope(isolate);
         Handle<Smi> e(Smi::FromInt(static_cast<int>(array->get_scalar(j))),
                       isolate);
-        visitor->visit(j, e);
+        if (!visitor->visit(j, e)) return false;
       }
     } else {
       for (uint32_t j = 0; j < len; j++) {
@@ -809,11 +880,11 @@ void IterateTypedArrayElements(Isolate* isolate, Handle<JSObject> receiver,
         int64_t val = static_cast<int64_t>(array->get_scalar(j));
         if (Smi::IsValid(static_cast<intptr_t>(val))) {
           Handle<Smi> e(Smi::FromInt(static_cast<int>(val)), isolate);
-          visitor->visit(j, e);
+          if (!visitor->visit(j, e)) return false;
         } else {
           Handle<Object> e =
               isolate->factory()->NewNumber(static_cast<ElementType>(val));
-          visitor->visit(j, e);
+          if (!visitor->visit(j, e)) return false;
         }
       }
     }
@@ -821,9 +892,10 @@ void IterateTypedArrayElements(Isolate* isolate, Handle<JSObject> receiver,
     for (uint32_t j = 0; j < len; j++) {
       HandleScope loop_scope(isolate);
       Handle<Object> e = isolate->factory()->NewNumber(array->get_scalar(j));
-      visitor->visit(j, e);
+      if (!visitor->visit(j, e)) return false;
     }
   }
+  return true;
 }
 
 
@@ -917,6 +989,28 @@ void CollectElementIndices(Handle<JSObject> object, uint32_t range,
       }
       break;
     }
+    case FAST_STRING_WRAPPER_ELEMENTS:
+    case SLOW_STRING_WRAPPER_ELEMENTS: {
+      DCHECK(object->IsJSValue());
+      Handle<JSValue> js_value = Handle<JSValue>::cast(object);
+      DCHECK(js_value->value()->IsString());
+      Handle<String> string(String::cast(js_value->value()), isolate);
+      uint32_t length = static_cast<uint32_t>(string->length());
+      uint32_t i = 0;
+      uint32_t limit = Min(length, range);
+      for (; i < limit; i++) {
+        indices->Add(i);
+      }
+      ElementsAccessor* accessor = object->GetElementsAccessor();
+      for (; i < range; i++) {
+        if (accessor->HasElement(object, i)) {
+          indices->Add(i);
+        }
+      }
+      break;
+    }
+    case NO_ELEMENTS:
+      break;
   }
 
   PrototypeIterator iter(isolate, object);
@@ -929,7 +1023,7 @@ void CollectElementIndices(Handle<JSObject> object, uint32_t range,
 }
 
 
-bool IterateElementsSlow(Isolate* isolate, Handle<JSObject> receiver,
+bool IterateElementsSlow(Isolate* isolate, Handle<JSReceiver> receiver,
                          uint32_t length, ArrayConcatVisitor* visitor) {
   for (uint32_t i = 0; i < length; ++i) {
     HandleScope loop_scope(isolate);
@@ -940,7 +1034,7 @@ bool IterateElementsSlow(Isolate* isolate, Handle<JSObject> receiver,
       ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, element_value,
                                        Object::GetElement(isolate, receiver, i),
                                        false);
-      visitor->visit(i, element_value);
+      if (!visitor->visit(i, element_value)) return false;
     }
   }
   visitor->increase_index_offset(length);
@@ -949,7 +1043,7 @@ bool IterateElementsSlow(Isolate* isolate, Handle<JSObject> receiver,
 
 
 /**
- * A helper function that visits elements of a JSObject in numerical
+ * A helper function that visits "array" elements of a JSReceiver in numerical
  * order.
  *
  * The visitor argument called for each existing element in the array
@@ -958,7 +1052,7 @@ bool IterateElementsSlow(Isolate* isolate, Handle<JSObject> receiver,
  * length.
  * Returns false if any access threw an exception, otherwise true.
  */
-bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
+bool IterateElements(Isolate* isolate, Handle<JSReceiver> receiver,
                      ArrayConcatVisitor* visitor) {
   uint32_t length = 0;
 
@@ -984,32 +1078,33 @@ bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
     // use the slow case.
     return IterateElementsSlow(isolate, receiver, length, visitor);
   }
+  Handle<JSObject> array = Handle<JSObject>::cast(receiver);
 
-  switch (receiver->GetElementsKind()) {
+  switch (array->GetElementsKind()) {
     case FAST_SMI_ELEMENTS:
     case FAST_ELEMENTS:
     case FAST_HOLEY_SMI_ELEMENTS:
     case FAST_HOLEY_ELEMENTS: {
       // Run through the elements FixedArray and use HasElement and GetElement
       // to check the prototype for missing elements.
-      Handle<FixedArray> elements(FixedArray::cast(receiver->elements()));
+      Handle<FixedArray> elements(FixedArray::cast(array->elements()));
       int fast_length = static_cast<int>(length);
       DCHECK(fast_length <= elements->length());
       for (int j = 0; j < fast_length; j++) {
         HandleScope loop_scope(isolate);
         Handle<Object> element_value(elements->get(j), isolate);
         if (!element_value->IsTheHole()) {
-          visitor->visit(j, element_value);
+          if (!visitor->visit(j, element_value)) return false;
         } else {
-          Maybe<bool> maybe = JSReceiver::HasElement(receiver, j);
+          Maybe<bool> maybe = JSReceiver::HasElement(array, j);
           if (!maybe.IsJust()) return false;
           if (maybe.FromJust()) {
-            // Call GetElement on receiver, not its prototype, or getters won't
+            // Call GetElement on array, not its prototype, or getters won't
             // have the correct receiver.
             ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-                isolate, element_value,
-                Object::GetElement(isolate, receiver, j), false);
-            visitor->visit(j, element_value);
+                isolate, element_value, Object::GetElement(isolate, array, j),
+                false);
+            if (!visitor->visit(j, element_value)) return false;
           }
         }
       }
@@ -1021,12 +1116,12 @@ bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
       if (length == 0) break;
       // Run through the elements FixedArray and use HasElement and GetElement
       // to check the prototype for missing elements.
-      if (receiver->elements()->IsFixedArray()) {
-        DCHECK(receiver->elements()->length() == 0);
+      if (array->elements()->IsFixedArray()) {
+        DCHECK(array->elements()->length() == 0);
         break;
       }
       Handle<FixedDoubleArray> elements(
-          FixedDoubleArray::cast(receiver->elements()));
+          FixedDoubleArray::cast(array->elements()));
       int fast_length = static_cast<int>(length);
       DCHECK(fast_length <= elements->length());
       for (int j = 0; j < fast_length; j++) {
@@ -1035,18 +1130,18 @@ bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
           double double_value = elements->get_scalar(j);
           Handle<Object> element_value =
               isolate->factory()->NewNumber(double_value);
-          visitor->visit(j, element_value);
+          if (!visitor->visit(j, element_value)) return false;
         } else {
-          Maybe<bool> maybe = JSReceiver::HasElement(receiver, j);
+          Maybe<bool> maybe = JSReceiver::HasElement(array, j);
           if (!maybe.IsJust()) return false;
           if (maybe.FromJust()) {
-            // Call GetElement on receiver, not its prototype, or getters won't
+            // Call GetElement on array, not its prototype, or getters won't
             // have the correct receiver.
             Handle<Object> element_value;
             ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-                isolate, element_value,
-                Object::GetElement(isolate, receiver, j), false);
-            visitor->visit(j, element_value);
+                isolate, element_value, Object::GetElement(isolate, array, j),
+                false);
+            if (!visitor->visit(j, element_value)) return false;
           }
         }
       }
@@ -1055,17 +1150,17 @@ bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
     case DICTIONARY_ELEMENTS: {
       // CollectElementIndices() can't be called when there's a JSProxy
       // on the prototype chain.
-      for (PrototypeIterator iter(isolate, receiver); !iter.IsAtEnd();
+      for (PrototypeIterator iter(isolate, array); !iter.IsAtEnd();
            iter.Advance()) {
         if (PrototypeIterator::GetCurrent(iter)->IsJSProxy()) {
-          return IterateElementsSlow(isolate, receiver, length, visitor);
+          return IterateElementsSlow(isolate, array, length, visitor);
         }
       }
-      Handle<SeededNumberDictionary> dict(receiver->element_dictionary());
+      Handle<SeededNumberDictionary> dict(array->element_dictionary());
       List<uint32_t> indices(dict->Capacity() / 2);
       // Collect all indices in the object and the prototypes less
       // than length. This might introduce duplicates in the indices list.
-      CollectElementIndices(receiver, length, &indices);
+      CollectElementIndices(array, length, &indices);
       indices.Sort(&compareUInt32);
       int j = 0;
       int n = indices.length();
@@ -1074,9 +1169,8 @@ bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
         uint32_t index = indices[j];
         Handle<Object> element;
         ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-            isolate, element, Object::GetElement(isolate, receiver, index),
-            false);
-        visitor->visit(index, element);
+            isolate, element, Object::GetElement(isolate, array, index), false);
+        if (!visitor->visit(index, element)) return false;
         // Skip to next different index (i.e., omit duplicates).
         do {
           j++;
@@ -1086,7 +1180,7 @@ bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
     }
     case UINT8_CLAMPED_ELEMENTS: {
       Handle<FixedUint8ClampedArray> pixels(
-          FixedUint8ClampedArray::cast(receiver->elements()));
+          FixedUint8ClampedArray::cast(array->elements()));
       for (uint32_t j = 0; j < length; j++) {
         Handle<Smi> e(Smi::FromInt(pixels->get_scalar(j)), isolate);
         visitor->visit(j, e);
@@ -1094,43 +1188,51 @@ bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
       break;
     }
     case INT8_ELEMENTS: {
-      IterateTypedArrayElements<FixedInt8Array, int8_t>(isolate, receiver, true,
-                                                        true, visitor);
+      if (!IterateTypedArrayElements<FixedInt8Array, int8_t>(
+              isolate, array, true, true, visitor))
+        return false;
       break;
     }
     case UINT8_ELEMENTS: {
-      IterateTypedArrayElements<FixedUint8Array, uint8_t>(isolate, receiver,
-                                                          true, true, visitor);
+      if (!IterateTypedArrayElements<FixedUint8Array, uint8_t>(
+              isolate, array, true, true, visitor))
+        return false;
       break;
     }
     case INT16_ELEMENTS: {
-      IterateTypedArrayElements<FixedInt16Array, int16_t>(isolate, receiver,
-                                                          true, true, visitor);
+      if (!IterateTypedArrayElements<FixedInt16Array, int16_t>(
+              isolate, array, true, true, visitor))
+        return false;
       break;
     }
     case UINT16_ELEMENTS: {
-      IterateTypedArrayElements<FixedUint16Array, uint16_t>(
-          isolate, receiver, true, true, visitor);
+      if (!IterateTypedArrayElements<FixedUint16Array, uint16_t>(
+              isolate, array, true, true, visitor))
+        return false;
       break;
     }
     case INT32_ELEMENTS: {
-      IterateTypedArrayElements<FixedInt32Array, int32_t>(isolate, receiver,
-                                                          true, false, visitor);
+      if (!IterateTypedArrayElements<FixedInt32Array, int32_t>(
+              isolate, array, true, false, visitor))
+        return false;
       break;
     }
     case UINT32_ELEMENTS: {
-      IterateTypedArrayElements<FixedUint32Array, uint32_t>(
-          isolate, receiver, true, false, visitor);
+      if (!IterateTypedArrayElements<FixedUint32Array, uint32_t>(
+              isolate, array, true, false, visitor))
+        return false;
       break;
     }
     case FLOAT32_ELEMENTS: {
-      IterateTypedArrayElements<FixedFloat32Array, float>(
-          isolate, receiver, false, false, visitor);
+      if (!IterateTypedArrayElements<FixedFloat32Array, float>(
+              isolate, array, false, false, visitor))
+        return false;
       break;
     }
     case FLOAT64_ELEMENTS: {
-      IterateTypedArrayElements<FixedFloat64Array, double>(
-          isolate, receiver, false, false, visitor);
+      if (!IterateTypedArrayElements<FixedFloat64Array, double>(
+              isolate, array, false, false, visitor))
+        return false;
       break;
     }
     case FAST_SLOPPY_ARGUMENTS_ELEMENTS:
@@ -1139,12 +1241,18 @@ bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
         HandleScope loop_scope(isolate);
         Handle<Object> element;
         ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-            isolate, element, Object::GetElement(isolate, receiver, index),
-            false);
-        visitor->visit(index, element);
+            isolate, element, Object::GetElement(isolate, array, index), false);
+        if (!visitor->visit(index, element)) return false;
       }
       break;
     }
+    case NO_ELEMENTS:
+      break;
+    case FAST_STRING_WRAPPER_ELEMENTS:
+    case SLOW_STRING_WRAPPER_ELEMENTS:
+      // |array| is guaranteed to be an array or typed array.
+      UNREACHABLE();
+      break;
   }
   visitor->increase_index_offset(length);
   return true;
@@ -1152,39 +1260,31 @@ bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
 
 
 bool HasConcatSpreadableModifier(Isolate* isolate, Handle<JSArray> obj) {
-  if (!FLAG_harmony_concat_spreadable) return false;
+  DCHECK(isolate->IsFastArrayConstructorPrototypeChainIntact());
   Handle<Symbol> key(isolate->factory()->is_concat_spreadable_symbol());
-  Maybe<bool> maybe =
-      JSReceiver::HasProperty(Handle<JSReceiver>::cast(obj), key);
-  if (!maybe.IsJust()) return false;
-  return maybe.FromJust();
+  Maybe<bool> maybe = JSReceiver::HasProperty(obj, key);
+  return maybe.FromMaybe(false);
 }
 
 
-bool IsConcatSpreadable(Isolate* isolate, Handle<Object> obj) {
+static Maybe<bool> IsConcatSpreadable(Isolate* isolate, Handle<Object> obj) {
   HandleScope handle_scope(isolate);
-  if (!obj->IsJSReceiver()) return false;
-  if (FLAG_harmony_concat_spreadable) {
-    Handle<Symbol> key(isolate->factory()->is_concat_spreadable_symbol());
-    Handle<Object> value;
-    MaybeHandle<Object> maybeValue =
-        i::Runtime::GetObjectProperty(isolate, obj, key);
-    if (maybeValue.ToHandle(&value) && !value->IsUndefined()) {
-      return value->BooleanValue();
-    }
-  }
-  return obj->IsJSArray();
+  if (!obj->IsJSReceiver()) return Just(false);
+  Handle<Symbol> key(isolate->factory()->is_concat_spreadable_symbol());
+  Handle<Object> value;
+  MaybeHandle<Object> maybeValue =
+      i::Runtime::GetObjectProperty(isolate, obj, key);
+  if (!maybeValue.ToHandle(&value)) return Nothing<bool>();
+  if (!value->IsUndefined()) return Just(value->BooleanValue());
+  return Object::IsArray(obj);
 }
 
 
-/**
- * Array::concat implementation.
- * See ECMAScript 262, 15.4.4.4.
- * TODO(581): Fix non-compliance for very large concatenations and update to
- * following the ECMAScript 5 specification.
- */
-Object* Slow_ArrayConcat(Arguments* args, Isolate* isolate) {
+Object* Slow_ArrayConcat(Arguments* args, Handle<Object> species,
+                         Isolate* isolate) {
   int argument_count = args->length();
+
+  bool is_array_species = *species == isolate->context()->array_function();
 
   // Pass 1: estimate the length and number of elements of the result.
   // The actual length can be larger if any of the arguments have getters
@@ -1236,7 +1336,8 @@ Object* Slow_ArrayConcat(Arguments* args, Isolate* isolate) {
   // If estimated number of elements is more than half of length, a
   // fixed array (fast case) is more time and space-efficient than a
   // dictionary.
-  bool fast_case = (estimate_nof_elements * 2) >= estimate_result_length;
+  bool fast_case =
+      is_array_species && (estimate_nof_elements * 2) >= estimate_result_length;
 
   if (fast_case && kind == FAST_DOUBLE_ELEMENTS) {
     Handle<FixedArrayBase> storage =
@@ -1298,6 +1399,7 @@ Object* Slow_ArrayConcat(Arguments* args, Isolate* isolate) {
             case FAST_HOLEY_ELEMENTS:
             case FAST_ELEMENTS:
             case DICTIONARY_ELEMENTS:
+            case NO_ELEMENTS:
               DCHECK_EQ(0u, length);
               break;
             default:
@@ -1320,28 +1422,35 @@ Object* Slow_ArrayConcat(Arguments* args, Isolate* isolate) {
     // In case of failure, fall through.
   }
 
-  Handle<FixedArray> storage;
+  Handle<Object> storage;
   if (fast_case) {
     // The backing storage array must have non-existing elements to preserve
     // holes across concat operations.
     storage =
         isolate->factory()->NewFixedArrayWithHoles(estimate_result_length);
-  } else {
+  } else if (is_array_species) {
     // TODO(126): move 25% pre-allocation logic into Dictionary::Allocate
     uint32_t at_least_space_for =
         estimate_nof_elements + (estimate_nof_elements >> 2);
-    storage = Handle<FixedArray>::cast(
-        SeededNumberDictionary::New(isolate, at_least_space_for));
+    storage = SeededNumberDictionary::New(isolate, at_least_space_for);
+  } else {
+    DCHECK(species->IsConstructor());
+    Handle<Object> length(Smi::FromInt(0), isolate);
+    Handle<Object> storage_object;
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, storage_object,
+        Execution::New(isolate, species, species, 1, &length));
+    storage = storage_object;
   }
 
   ArrayConcatVisitor visitor(isolate, storage, fast_case);
 
   for (int i = 0; i < argument_count; i++) {
     Handle<Object> obj((*args)[i], isolate);
-    bool spreadable = IsConcatSpreadable(isolate, obj);
-    if (isolate->has_pending_exception()) return isolate->heap()->exception();
-    if (spreadable) {
-      Handle<JSObject> object = Handle<JSObject>::cast(obj);
+    Maybe<bool> spreadable = IsConcatSpreadable(isolate, obj);
+    MAYBE_RETURN(spreadable, isolate->heap()->exception());
+    if (spreadable.FromJust()) {
+      Handle<JSReceiver> object = Handle<JSReceiver>::cast(obj);
       if (!IterateElements(isolate, object, &visitor)) {
         return isolate->heap()->exception();
       }
@@ -1355,7 +1464,12 @@ Object* Slow_ArrayConcat(Arguments* args, Isolate* isolate) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewRangeError(MessageTemplate::kInvalidArrayLength));
   }
-  return *visitor.ToArray();
+
+  if (is_array_species) {
+    return *visitor.ToArray();
+  } else {
+    return *visitor.storage_jsreceiver();
+  }
 }
 
 
@@ -1401,29 +1515,41 @@ MaybeHandle<JSArray> Fast_ArrayConcat(Isolate* isolate, Arguments* args) {
 
 }  // namespace
 
+
+// ES6 22.1.3.1 Array.prototype.concat
 BUILTIN(ArrayConcat) {
   HandleScope scope(isolate);
 
-  Handle<Object> receiver;
-  if (!Object::ToObject(isolate, handle(args[0], isolate))
-           .ToHandle(&receiver)) {
+  Handle<Object> receiver = args.receiver();
+  // TODO(bmeurer): Do we really care about the exact exception message here?
+  if (receiver->IsNull() || receiver->IsUndefined()) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewTypeError(MessageTemplate::kCalledOnNullOrUndefined,
                               isolate->factory()->NewStringFromAsciiChecked(
                                   "Array.prototype.concat")));
   }
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, receiver, Object::ToObject(isolate, args.receiver()));
   args[0] = *receiver;
 
   Handle<JSArray> result_array;
-  if (Fast_ArrayConcat(isolate, &args).ToHandle(&result_array)) {
-    return *result_array;
+
+  // Reading @@species happens before anything else with a side effect, so
+  // we can do it here to determine whether to take the fast path.
+  Handle<Object> species;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, species, Object::ArraySpeciesConstructor(isolate, receiver));
+  if (*species == isolate->context()->native_context()->array_function()) {
+    if (Fast_ArrayConcat(isolate, &args).ToHandle(&result_array)) {
+      return *result_array;
+    }
+    if (isolate->has_pending_exception()) return isolate->heap()->exception();
   }
-  if (isolate->has_pending_exception()) return isolate->heap()->exception();
-  return Slow_ArrayConcat(&args, isolate);
+  return Slow_ArrayConcat(&args, species, isolate);
 }
 
 
-// ES6 section 22.1.2.2 Array.isArray
+// ES6 22.1.2.2 Array.isArray
 BUILTIN(ArrayIsArray) {
   HandleScope scope(isolate);
   DCHECK_EQ(2, args.length());
@@ -1431,6 +1557,401 @@ BUILTIN(ArrayIsArray) {
   Maybe<bool> result = Object::IsArray(object);
   MAYBE_RETURN(result, isolate->heap()->exception());
   return *isolate->factory()->ToBoolean(result.FromJust());
+}
+
+
+// ES6 19.1.2.1 Object.assign
+BUILTIN(ObjectAssign) {
+  HandleScope scope(isolate);
+  Handle<Object> target = args.atOrUndefined(isolate, 1);
+
+  // 1. Let to be ? ToObject(target).
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, target,
+                                     Object::ToObject(isolate, target));
+  Handle<JSReceiver> to = Handle<JSReceiver>::cast(target);
+  // 2. If only one argument was passed, return to.
+  if (args.length() == 2) return *to;
+  // 3. Let sources be the List of argument values starting with the
+  //    second argument.
+  // 4. For each element nextSource of sources, in ascending index order,
+  for (int i = 2; i < args.length(); ++i) {
+    Handle<Object> next_source = args.at<Object>(i);
+    // 4a. If nextSource is undefined or null, let keys be an empty List.
+    if (next_source->IsUndefined() || next_source->IsNull()) continue;
+    // 4b. Else,
+    // 4b i. Let from be ToObject(nextSource).
+    Handle<JSReceiver> from =
+        Object::ToObject(isolate, next_source).ToHandleChecked();
+    // 4b ii. Let keys be ? from.[[OwnPropertyKeys]]().
+    Handle<FixedArray> keys;
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, keys,
+        JSReceiver::GetKeys(from, OWN_ONLY, ALL_PROPERTIES, KEEP_NUMBERS));
+    // 4c. Repeat for each element nextKey of keys in List order,
+    for (int j = 0; j < keys->length(); ++j) {
+      Handle<Object> next_key(keys->get(j), isolate);
+      // 4c i. Let desc be ? from.[[GetOwnProperty]](nextKey).
+      PropertyDescriptor desc;
+      Maybe<bool> found =
+          JSReceiver::GetOwnPropertyDescriptor(isolate, from, next_key, &desc);
+      if (found.IsNothing()) return isolate->heap()->exception();
+      // 4c ii. If desc is not undefined and desc.[[Enumerable]] is true, then
+      if (found.FromJust() && desc.enumerable()) {
+        // 4c ii 1. Let propValue be ? Get(from, nextKey).
+        Handle<Object> prop_value;
+        ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+            isolate, prop_value,
+            Runtime::GetObjectProperty(isolate, from, next_key, STRICT));
+        // 4c ii 2. Let status be ? Set(to, nextKey, propValue, true).
+        Handle<Object> status;
+        ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+            isolate, status, Runtime::SetObjectProperty(isolate, to, next_key,
+                                                        prop_value, STRICT));
+      }
+    }
+  }
+  // 5. Return to.
+  return *to;
+}
+
+
+// ES6 section 19.1.2.2 Object.create ( O [ , Properties ] )
+BUILTIN(ObjectCreate) {
+  HandleScope scope(isolate);
+  Handle<Object> prototype = args.atOrUndefined(isolate, 1);
+  if (!prototype->IsNull() && !prototype->IsJSReceiver()) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewTypeError(MessageTemplate::kProtoObjectOrNull, prototype));
+  }
+
+  // Generate the map with the specified {prototype} based on the Object
+  // function's initial map from the current native context.
+  // TODO(bmeurer): Use a dedicated cache for Object.create; think about
+  // slack tracking for Object.create.
+  Handle<Map> map(isolate->native_context()->object_function()->initial_map(),
+                  isolate);
+  if (map->prototype() != *prototype) {
+    map = Map::TransitionToPrototype(map, prototype, FAST_PROTOTYPE);
+  }
+
+  // Actually allocate the object.
+  Handle<JSObject> object = isolate->factory()->NewJSObjectFromMap(map);
+
+  // Define the properties if properties was specified and is not undefined.
+  Handle<Object> properties = args.atOrUndefined(isolate, 2);
+  if (!properties->IsUndefined()) {
+    RETURN_FAILURE_ON_EXCEPTION(
+        isolate, JSReceiver::DefineProperties(isolate, object, properties));
+  }
+
+  return *object;
+}
+
+
+// ES6 section 19.1.2.5 Object.freeze ( O )
+BUILTIN(ObjectFreeze) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  if (object->IsJSReceiver()) {
+    MAYBE_RETURN(JSReceiver::SetIntegrityLevel(Handle<JSReceiver>::cast(object),
+                                               FROZEN, Object::THROW_ON_ERROR),
+                 isolate->heap()->exception());
+  }
+  return *object;
+}
+
+
+// ES6 section 19.1.2.6 Object.getOwnPropertyDescriptor ( O, P )
+BUILTIN(ObjectGetOwnPropertyDescriptor) {
+  HandleScope scope(isolate);
+  // 1. Let obj be ? ToObject(O).
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  Handle<JSReceiver> receiver;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver,
+                                     Object::ToObject(isolate, object));
+  // 2. Let key be ? ToPropertyKey(P).
+  Handle<Object> property = args.atOrUndefined(isolate, 2);
+  Handle<Name> key;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, key,
+                                     Object::ToName(isolate, property));
+  // 3. Let desc be ? obj.[[GetOwnProperty]](key).
+  PropertyDescriptor desc;
+  Maybe<bool> found =
+      JSReceiver::GetOwnPropertyDescriptor(isolate, receiver, key, &desc);
+  MAYBE_RETURN(found, isolate->heap()->exception());
+  // 4. Return FromPropertyDescriptor(desc).
+  if (!found.FromJust()) return isolate->heap()->undefined_value();
+  return *desc.ToObject(isolate);
+}
+
+
+namespace {
+
+Object* GetOwnPropertyKeys(Isolate* isolate,
+                           BuiltinArguments<BuiltinExtraArguments::kNone> args,
+                           PropertyFilter filter) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  Handle<JSReceiver> receiver;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver,
+                                     Object::ToObject(isolate, object));
+  Handle<FixedArray> keys;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, keys,
+      JSReceiver::GetKeys(receiver, OWN_ONLY, filter, CONVERT_TO_STRING));
+  return *isolate->factory()->NewJSArrayWithElements(keys);
+}
+
+}  // namespace
+
+
+// ES6 section 19.1.2.7 Object.getOwnPropertyNames ( O )
+BUILTIN(ObjectGetOwnPropertyNames) {
+  return GetOwnPropertyKeys(isolate, args, SKIP_SYMBOLS);
+}
+
+
+// ES6 section 19.1.2.8 Object.getOwnPropertySymbols ( O )
+BUILTIN(ObjectGetOwnPropertySymbols) {
+  return GetOwnPropertyKeys(isolate, args, SKIP_STRINGS);
+}
+
+
+// ES6 section 19.1.2.11 Object.isExtensible ( O )
+BUILTIN(ObjectIsExtensible) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  Maybe<bool> result =
+      object->IsJSReceiver()
+          ? JSReceiver::IsExtensible(Handle<JSReceiver>::cast(object))
+          : Just(false);
+  MAYBE_RETURN(result, isolate->heap()->exception());
+  return isolate->heap()->ToBoolean(result.FromJust());
+}
+
+
+// ES6 section 19.1.2.12 Object.isFrozen ( O )
+BUILTIN(ObjectIsFrozen) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  Maybe<bool> result = object->IsJSReceiver()
+                           ? JSReceiver::TestIntegrityLevel(
+                                 Handle<JSReceiver>::cast(object), FROZEN)
+                           : Just(true);
+  MAYBE_RETURN(result, isolate->heap()->exception());
+  return isolate->heap()->ToBoolean(result.FromJust());
+}
+
+
+// ES6 section 19.1.2.13 Object.isSealed ( O )
+BUILTIN(ObjectIsSealed) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  Maybe<bool> result = object->IsJSReceiver()
+                           ? JSReceiver::TestIntegrityLevel(
+                                 Handle<JSReceiver>::cast(object), SEALED)
+                           : Just(true);
+  MAYBE_RETURN(result, isolate->heap()->exception());
+  return isolate->heap()->ToBoolean(result.FromJust());
+}
+
+
+// ES6 section 19.1.2.14 Object.keys ( O )
+BUILTIN(ObjectKeys) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  Handle<JSReceiver> receiver;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver,
+                                     Object::ToObject(isolate, object));
+  Handle<FixedArray> keys;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, keys, JSReceiver::GetKeys(receiver, OWN_ONLY, ENUMERABLE_STRINGS,
+                                         CONVERT_TO_STRING));
+  return *isolate->factory()->NewJSArrayWithElements(keys);
+}
+
+
+BUILTIN(ObjectValues) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  Handle<JSReceiver> receiver;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver,
+                                     Object::ToObject(isolate, object));
+  Handle<FixedArray> keys;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, keys, JSReceiver::GetKeys(receiver, OWN_ONLY, ENUMERABLE_STRINGS,
+                                         CONVERT_TO_STRING));
+
+  for (int i = 0; i < keys->length(); ++i) {
+    auto key = Handle<Name>::cast(FixedArray::get(*keys, i, isolate));
+    Handle<Object> value;
+
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, value, Object::GetPropertyOrElement(receiver, key, STRICT));
+
+    keys->set(i, *value);
+  }
+
+  return *isolate->factory()->NewJSArrayWithElements(keys);
+}
+
+
+BUILTIN(ObjectEntries) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  Handle<JSReceiver> receiver;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver,
+                                     Object::ToObject(isolate, object));
+  Handle<FixedArray> keys;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, keys, JSReceiver::GetKeys(receiver, OWN_ONLY, ENUMERABLE_STRINGS,
+                                         CONVERT_TO_STRING));
+
+  for (int i = 0; i < keys->length(); ++i) {
+    auto key = Handle<Name>::cast(FixedArray::get(*keys, i, isolate));
+    Handle<Object> value;
+
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, value, Object::GetPropertyOrElement(receiver, key, STRICT));
+
+    auto entry_storage = isolate->factory()->NewUninitializedFixedArray(2);
+    entry_storage->set(0, *key);
+    entry_storage->set(1, *value);
+    auto entry = isolate->factory()->NewJSArrayWithElements(entry_storage);
+    keys->set(i, *entry);
+  }
+
+  return *isolate->factory()->NewJSArrayWithElements(keys);
+}
+
+BUILTIN(ObjectGetOwnPropertyDescriptors) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  Handle<Object> undefined = isolate->factory()->undefined_value();
+
+  Handle<JSReceiver> receiver;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver,
+                                     Object::ToObject(isolate, object));
+
+  Handle<FixedArray> keys;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, keys, JSReceiver::GetKeys(receiver, OWN_ONLY, ALL_PROPERTIES,
+                                         CONVERT_TO_STRING));
+
+  Handle<Object> descriptors =
+      isolate->factory()->NewJSObject(isolate->object_function());
+
+  for (int i = 0; i < keys->length(); ++i) {
+    Handle<Name> key = Handle<Name>::cast(FixedArray::get(*keys, i, isolate));
+    PropertyDescriptor descriptor;
+    Maybe<bool> did_get_descriptor = JSReceiver::GetOwnPropertyDescriptor(
+        isolate, receiver, key, &descriptor);
+    MAYBE_RETURN(did_get_descriptor, isolate->heap()->exception());
+
+    Handle<Object> from_descriptor = did_get_descriptor.FromJust()
+                                         ? descriptor.ToObject(isolate)
+                                         : undefined;
+
+    LookupIterator it = LookupIterator::PropertyOrElement(
+        isolate, descriptors, key, LookupIterator::OWN);
+    Maybe<bool> success = JSReceiver::CreateDataProperty(&it, from_descriptor,
+                                                         Object::DONT_THROW);
+    CHECK(success.FromJust());
+  }
+
+  return *descriptors;
+}
+
+// ES6 section 19.1.2.15 Object.preventExtensions ( O )
+BUILTIN(ObjectPreventExtensions) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  if (object->IsJSReceiver()) {
+    MAYBE_RETURN(JSReceiver::PreventExtensions(Handle<JSReceiver>::cast(object),
+                                               Object::THROW_ON_ERROR),
+                 isolate->heap()->exception());
+  }
+  return *object;
+}
+
+
+// ES6 section 19.1.2.17 Object.seal ( O )
+BUILTIN(ObjectSeal) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  if (object->IsJSReceiver()) {
+    MAYBE_RETURN(JSReceiver::SetIntegrityLevel(Handle<JSReceiver>::cast(object),
+                                               SEALED, Object::THROW_ON_ERROR),
+                 isolate->heap()->exception());
+  }
+  return *object;
+}
+
+
+namespace {
+
+bool CodeGenerationFromStringsAllowed(Isolate* isolate,
+                                      Handle<Context> context) {
+  DCHECK(context->allow_code_gen_from_strings()->IsFalse());
+  // Check with callback if set.
+  AllowCodeGenerationFromStringsCallback callback =
+      isolate->allow_code_gen_callback();
+  if (callback == NULL) {
+    // No callback set and code generation disallowed.
+    return false;
+  } else {
+    // Callback set. Let it decide if code generation is allowed.
+    VMState<EXTERNAL> state(isolate);
+    return callback(v8::Utils::ToLocal(context));
+  }
+}
+
+
+MaybeHandle<JSFunction> CompileString(Handle<Context> context,
+                                      Handle<String> source,
+                                      ParseRestriction restriction) {
+  Isolate* const isolate = context->GetIsolate();
+  Handle<Context> native_context(context->native_context(), isolate);
+
+  // Check if native context allows code generation from
+  // strings. Throw an exception if it doesn't.
+  if (native_context->allow_code_gen_from_strings()->IsFalse() &&
+      !CodeGenerationFromStringsAllowed(isolate, native_context)) {
+    Handle<Object> error_message =
+        native_context->ErrorMessageForCodeGenerationFromStrings();
+    THROW_NEW_ERROR(isolate, NewEvalError(MessageTemplate::kCodeGenFromStrings,
+                                          error_message),
+                    JSFunction);
+  }
+
+  // Compile source string in the native context.
+  Handle<SharedFunctionInfo> outer_info(native_context->closure()->shared(),
+                                        isolate);
+  return Compiler::GetFunctionFromEval(source, outer_info, native_context,
+                                       SLOPPY, restriction,
+                                       RelocInfo::kNoPosition);
+}
+
+}  // namespace
+
+
+// ES6 section 18.2.1 eval (x)
+BUILTIN(GlobalEval) {
+  HandleScope scope(isolate);
+  Handle<Object> x = args.atOrUndefined(isolate, 1);
+  Handle<JSFunction> target = args.target();
+  Handle<JSObject> target_global_proxy(target->global_proxy(), isolate);
+  if (!x->IsString()) return *x;
+  Handle<JSFunction> function;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, function,
+      CompileString(handle(target->native_context(), isolate),
+                    Handle<String>::cast(x), NO_PARSE_RESTRICTION));
+  Handle<Object> result;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, result,
+      Execution::Call(isolate, function, target_global_proxy, 0, nullptr));
+  return *result;
 }
 
 
@@ -1458,12 +1979,11 @@ BUILTIN(ReflectDefineProperty) {
     return isolate->heap()->exception();
   }
 
-  bool result =
+  Maybe<bool> result =
       JSReceiver::DefineOwnProperty(isolate, Handle<JSReceiver>::cast(target),
                                     name, &desc, Object::DONT_THROW);
-  if (isolate->has_pending_exception()) return isolate->heap()->exception();
-  // TODO(neis): Make DefineOwnProperty return Maybe<bool>.
-  return *isolate->factory()->ToBoolean(result);
+  MAYBE_RETURN(result, isolate->heap()->exception());
+  return *isolate->factory()->ToBoolean(result.FromJust());
 }
 
 
@@ -1495,9 +2015,8 @@ BUILTIN(ReflectDeleteProperty) {
 // ES6 section 26.1.6 Reflect.get
 BUILTIN(ReflectGet) {
   HandleScope scope(isolate);
-  Handle<Object> undef = isolate->factory()->undefined_value();
-  Handle<Object> target = args.length() > 1 ? args.at<Object>(1) : undef;
-  Handle<Object> key = args.length() > 2 ? args.at<Object>(2) : undef;
+  Handle<Object> target = args.atOrUndefined(isolate, 1);
+  Handle<Object> key = args.atOrUndefined(isolate, 2);
   Handle<Object> receiver = args.length() > 3 ? args.at<Object>(3) : target;
 
   if (!target->IsJSReceiver()) {
@@ -1514,7 +2033,7 @@ BUILTIN(ReflectGet) {
   Handle<Object> result;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, result, Object::GetPropertyOrElement(
-          Handle<JSReceiver>::cast(target), name, receiver));
+                           receiver, name, Handle<JSReceiver>::cast(target)));
 
   return *result;
 }
@@ -1539,10 +2058,10 @@ BUILTIN(ReflectGetOwnPropertyDescriptor) {
                                      Object::ToName(isolate, key));
 
   PropertyDescriptor desc;
-  bool found = JSReceiver::GetOwnPropertyDescriptor(
+  Maybe<bool> found = JSReceiver::GetOwnPropertyDescriptor(
       isolate, Handle<JSReceiver>::cast(target), name, &desc);
-  if (isolate->has_pending_exception()) return isolate->heap()->exception();
-  if (!found) return isolate->heap()->undefined_value();
+  MAYBE_RETURN(found, isolate->heap()->exception());
+  if (!found.FromJust()) return isolate->heap()->undefined_value();
   return *desc.ToObject(isolate);
 }
 
@@ -1626,9 +2145,9 @@ BUILTIN(ReflectOwnKeys) {
 
   Handle<FixedArray> keys;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-      isolate, keys, JSReceiver::GetKeys(Handle<JSReceiver>::cast(target),
-                                         JSReceiver::OWN_ONLY, ALL_PROPERTIES,
-                                         CONVERT_TO_STRING));
+      isolate, keys,
+      JSReceiver::GetKeys(Handle<JSReceiver>::cast(target), OWN_ONLY,
+                          ALL_PROPERTIES, CONVERT_TO_STRING));
   return *isolate->factory()->NewJSArrayWithElements(keys);
 }
 
@@ -1656,10 +2175,9 @@ BUILTIN(ReflectPreventExtensions) {
 // ES6 section 26.1.13 Reflect.set
 BUILTIN(ReflectSet) {
   HandleScope scope(isolate);
-  Handle<Object> undef = isolate->factory()->undefined_value();
-  Handle<Object> target = args.length() > 1 ? args.at<Object>(1) : undef;
-  Handle<Object> key = args.length() > 2 ? args.at<Object>(2) : undef;
-  Handle<Object> value = args.length() > 3 ? args.at<Object>(3) : undef;
+  Handle<Object> target = args.atOrUndefined(isolate, 1);
+  Handle<Object> key = args.atOrUndefined(isolate, 2);
+  Handle<Object> value = args.atOrUndefined(isolate, 3);
   Handle<Object> receiver = args.length() > 4 ? args.at<Object>(4) : target;
 
   if (!target->IsJSReceiver()) {
@@ -1708,18 +2226,875 @@ BUILTIN(ReflectSetPrototypeOf) {
 }
 
 
+// -----------------------------------------------------------------------------
+// ES6 section 20.3 Date Objects
+
+
+namespace {
+
+// ES6 section 20.3.1.1 Time Values and Time Range
+const double kMinYear = -1000000.0;
+const double kMaxYear = -kMinYear;
+const double kMinMonth = -10000000.0;
+const double kMaxMonth = -kMinMonth;
+
+
+// 20.3.1.2 Day Number and Time within Day
+const double kMsPerDay = 86400000.0;
+
+
+// ES6 section 20.3.1.11 Hours, Minutes, Second, and Milliseconds
+const double kMsPerSecond = 1000.0;
+const double kMsPerMinute = 60000.0;
+const double kMsPerHour = 3600000.0;
+
+
+// ES6 section 20.3.1.14 MakeDate (day, time)
+double MakeDate(double day, double time) {
+  if (std::isfinite(day) && std::isfinite(time)) {
+    return time + day * kMsPerDay;
+  }
+  return std::numeric_limits<double>::quiet_NaN();
+}
+
+
+// ES6 section 20.3.1.13 MakeDay (year, month, date)
+double MakeDay(double year, double month, double date) {
+  if ((kMinYear <= year && year <= kMaxYear) &&
+      (kMinMonth <= month && month <= kMaxMonth) && std::isfinite(date)) {
+    int y = FastD2I(year);
+    int m = FastD2I(month);
+    y += m / 12;
+    m %= 12;
+    if (m < 0) {
+      m += 12;
+      y -= 1;
+    }
+    DCHECK_LE(0, m);
+    DCHECK_LT(m, 12);
+
+    // kYearDelta is an arbitrary number such that:
+    // a) kYearDelta = -1 (mod 400)
+    // b) year + kYearDelta > 0 for years in the range defined by
+    //    ECMA 262 - 15.9.1.1, i.e. upto 100,000,000 days on either side of
+    //    Jan 1 1970. This is required so that we don't run into integer
+    //    division of negative numbers.
+    // c) there shouldn't be an overflow for 32-bit integers in the following
+    //    operations.
+    static const int kYearDelta = 399999;
+    static const int kBaseDay =
+        365 * (1970 + kYearDelta) + (1970 + kYearDelta) / 4 -
+        (1970 + kYearDelta) / 100 + (1970 + kYearDelta) / 400;
+    int day_from_year = 365 * (y + kYearDelta) + (y + kYearDelta) / 4 -
+                        (y + kYearDelta) / 100 + (y + kYearDelta) / 400 -
+                        kBaseDay;
+    if ((y % 4 != 0) || (y % 100 == 0 && y % 400 != 0)) {
+      static const int kDayFromMonth[] = {0,   31,  59,  90,  120, 151,
+                                          181, 212, 243, 273, 304, 334};
+      day_from_year += kDayFromMonth[m];
+    } else {
+      static const int kDayFromMonth[] = {0,   31,  60,  91,  121, 152,
+                                          182, 213, 244, 274, 305, 335};
+      day_from_year += kDayFromMonth[m];
+    }
+    return static_cast<double>(day_from_year - 1) + date;
+  }
+  return std::numeric_limits<double>::quiet_NaN();
+}
+
+
+// ES6 section 20.3.1.12 MakeTime (hour, min, sec, ms)
+double MakeTime(double hour, double min, double sec, double ms) {
+  if (std::isfinite(hour) && std::isfinite(min) && std::isfinite(sec) &&
+      std::isfinite(ms)) {
+    double const h = DoubleToInteger(hour);
+    double const m = DoubleToInteger(min);
+    double const s = DoubleToInteger(sec);
+    double const milli = DoubleToInteger(ms);
+    return h * kMsPerHour + m * kMsPerMinute + s * kMsPerSecond + milli;
+  }
+  return std::numeric_limits<double>::quiet_NaN();
+}
+
+
+// ES6 section 20.3.1.15 TimeClip (time)
+double TimeClip(double time) {
+  if (-DateCache::kMaxTimeInMs <= time && time <= DateCache::kMaxTimeInMs) {
+    return DoubleToInteger(time) + 0.0;
+  }
+  return std::numeric_limits<double>::quiet_NaN();
+}
+
+
+const char* kShortWeekDays[] = {"Sun", "Mon", "Tue", "Wed",
+                                "Thu", "Fri", "Sat"};
+const char* kShortMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+
+// ES6 section 20.3.1.16 Date Time String Format
+double ParseDateTimeString(Handle<String> str) {
+  Isolate* const isolate = str->GetIsolate();
+  str = String::Flatten(str);
+  // TODO(bmeurer): Change DateParser to not use the FixedArray.
+  Handle<FixedArray> tmp =
+      isolate->factory()->NewFixedArray(DateParser::OUTPUT_SIZE);
+  DisallowHeapAllocation no_gc;
+  String::FlatContent str_content = str->GetFlatContent();
+  bool result;
+  if (str_content.IsOneByte()) {
+    result = DateParser::Parse(str_content.ToOneByteVector(), *tmp,
+                               isolate->unicode_cache());
+  } else {
+    result = DateParser::Parse(str_content.ToUC16Vector(), *tmp,
+                               isolate->unicode_cache());
+  }
+  if (!result) return std::numeric_limits<double>::quiet_NaN();
+  double const day = MakeDay(tmp->get(0)->Number(), tmp->get(1)->Number(),
+                             tmp->get(2)->Number());
+  double const time = MakeTime(tmp->get(3)->Number(), tmp->get(4)->Number(),
+                               tmp->get(5)->Number(), tmp->get(6)->Number());
+  double date = MakeDate(day, time);
+  if (tmp->get(7)->IsNull()) {
+    if (!std::isnan(date)) {
+      date = isolate->date_cache()->ToUTC(static_cast<int64_t>(date));
+    }
+  } else {
+    date -= tmp->get(7)->Number() * 1000.0;
+  }
+  return date;
+}
+
+
+enum ToDateStringMode { kDateOnly, kTimeOnly, kDateAndTime };
+
+
+// ES6 section 20.3.4.41.1 ToDateString(tv)
+void ToDateString(double time_val, Vector<char> str, DateCache* date_cache,
+                  ToDateStringMode mode = kDateAndTime) {
+  if (std::isnan(time_val)) {
+    SNPrintF(str, "Invalid Date");
+    return;
+  }
+  int64_t time_ms = static_cast<int64_t>(time_val);
+  int64_t local_time_ms = date_cache->ToLocal(time_ms);
+  int year, month, day, weekday, hour, min, sec, ms;
+  date_cache->BreakDownTime(local_time_ms, &year, &month, &day, &weekday, &hour,
+                            &min, &sec, &ms);
+  int timezone_offset = -date_cache->TimezoneOffset(time_ms);
+  int timezone_hour = std::abs(timezone_offset) / 60;
+  int timezone_min = std::abs(timezone_offset) % 60;
+  const char* local_timezone = date_cache->LocalTimezone(time_ms);
+  switch (mode) {
+    case kDateOnly:
+      SNPrintF(str, "%s %s %02d %4d", kShortWeekDays[weekday],
+               kShortMonths[month], day, year);
+      return;
+    case kTimeOnly:
+      SNPrintF(str, "%02d:%02d:%02d GMT%c%02d%02d (%s)", hour, min, sec,
+               (timezone_offset < 0) ? '-' : '+', timezone_hour, timezone_min,
+               local_timezone);
+      return;
+    case kDateAndTime:
+      SNPrintF(str, "%s %s %02d %4d %02d:%02d:%02d GMT%c%02d%02d (%s)",
+               kShortWeekDays[weekday], kShortMonths[month], day, year, hour,
+               min, sec, (timezone_offset < 0) ? '-' : '+', timezone_hour,
+               timezone_min, local_timezone);
+      return;
+  }
+  UNREACHABLE();
+}
+
+
+Object* SetLocalDateValue(Handle<JSDate> date, double time_val) {
+  if (time_val >= -DateCache::kMaxTimeBeforeUTCInMs &&
+      time_val <= DateCache::kMaxTimeBeforeUTCInMs) {
+    Isolate* const isolate = date->GetIsolate();
+    time_val = isolate->date_cache()->ToUTC(static_cast<int64_t>(time_val));
+  } else {
+    time_val = std::numeric_limits<double>::quiet_NaN();
+  }
+  return *JSDate::SetValue(date, TimeClip(time_val));
+}
+
+}  // namespace
+
+
+// ES6 section 20.3.2 The Date Constructor for the [[Call]] case.
+BUILTIN(DateConstructor) {
+  HandleScope scope(isolate);
+  double const time_val = JSDate::CurrentTimeValue(isolate);
+  char buffer[128];
+  Vector<char> str(buffer, arraysize(buffer));
+  ToDateString(time_val, str, isolate->date_cache());
+  return *isolate->factory()->NewStringFromAsciiChecked(str.start());
+}
+
+
+// ES6 section 20.3.2 The Date Constructor for the [[Construct]] case.
+BUILTIN(DateConstructor_ConstructStub) {
+  HandleScope scope(isolate);
+  int const argc = args.length() - 1;
+  Handle<JSFunction> target = args.target();
+  Handle<JSReceiver> new_target = Handle<JSReceiver>::cast(args.new_target());
+  double time_val;
+  if (argc == 0) {
+    time_val = JSDate::CurrentTimeValue(isolate);
+  } else if (argc == 1) {
+    Handle<Object> value = args.at<Object>(1);
+    if (value->IsJSDate()) {
+      time_val = Handle<JSDate>::cast(value)->value()->Number();
+    } else {
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, value,
+                                         Object::ToPrimitive(value));
+      if (value->IsString()) {
+        time_val = ParseDateTimeString(Handle<String>::cast(value));
+      } else {
+        ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, value,
+                                           Object::ToNumber(value));
+        time_val = value->Number();
+      }
+    }
+  } else {
+    Handle<Object> year_object;
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, year_object,
+                                       Object::ToNumber(args.at<Object>(1)));
+    Handle<Object> month_object;
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, month_object,
+                                       Object::ToNumber(args.at<Object>(2)));
+    double year = year_object->Number();
+    double month = month_object->Number();
+    double date = 1.0, hours = 0.0, minutes = 0.0, seconds = 0.0, ms = 0.0;
+    if (argc >= 3) {
+      Handle<Object> date_object;
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, date_object,
+                                         Object::ToNumber(args.at<Object>(3)));
+      date = date_object->Number();
+      if (argc >= 4) {
+        Handle<Object> hours_object;
+        ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+            isolate, hours_object, Object::ToNumber(args.at<Object>(4)));
+        hours = hours_object->Number();
+        if (argc >= 5) {
+          Handle<Object> minutes_object;
+          ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+              isolate, minutes_object, Object::ToNumber(args.at<Object>(5)));
+          minutes = minutes_object->Number();
+          if (argc >= 6) {
+            Handle<Object> seconds_object;
+            ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+                isolate, seconds_object, Object::ToNumber(args.at<Object>(6)));
+            seconds = seconds_object->Number();
+            if (argc >= 7) {
+              Handle<Object> ms_object;
+              ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+                  isolate, ms_object, Object::ToNumber(args.at<Object>(7)));
+              ms = ms_object->Number();
+            }
+          }
+        }
+      }
+    }
+    if (!std::isnan(year)) {
+      double const y = DoubleToInteger(year);
+      if (0.0 <= y && y <= 99) year = 1900 + y;
+    }
+    double const day = MakeDay(year, month, date);
+    double const time = MakeTime(hours, minutes, seconds, ms);
+    time_val = MakeDate(day, time);
+    if (time_val >= -DateCache::kMaxTimeBeforeUTCInMs &&
+        time_val <= DateCache::kMaxTimeBeforeUTCInMs) {
+      time_val = isolate->date_cache()->ToUTC(static_cast<int64_t>(time_val));
+    } else {
+      time_val = std::numeric_limits<double>::quiet_NaN();
+    }
+  }
+  Handle<JSDate> result;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, result,
+                                     JSDate::New(target, new_target, time_val));
+  return *result;
+}
+
+
+// ES6 section 20.3.3.1 Date.now ( )
+BUILTIN(DateNow) {
+  HandleScope scope(isolate);
+  return *isolate->factory()->NewNumber(JSDate::CurrentTimeValue(isolate));
+}
+
+
+// ES6 section 20.3.3.2 Date.parse ( string )
+BUILTIN(DateParse) {
+  HandleScope scope(isolate);
+  Handle<String> string;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, string,
+      Object::ToString(isolate, args.atOrUndefined(isolate, 1)));
+  return *isolate->factory()->NewNumber(ParseDateTimeString(string));
+}
+
+
+// ES6 section 20.3.3.4 Date.UTC (year,month,date,hours,minutes,seconds,ms)
+BUILTIN(DateUTC) {
+  HandleScope scope(isolate);
+  int const argc = args.length() - 1;
+  double year = std::numeric_limits<double>::quiet_NaN();
+  double month = std::numeric_limits<double>::quiet_NaN();
+  double date = 1.0, hours = 0.0, minutes = 0.0, seconds = 0.0, ms = 0.0;
+  if (argc >= 1) {
+    Handle<Object> year_object;
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, year_object,
+                                       Object::ToNumber(args.at<Object>(1)));
+    year = year_object->Number();
+    if (argc >= 2) {
+      Handle<Object> month_object;
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, month_object,
+                                         Object::ToNumber(args.at<Object>(2)));
+      month = month_object->Number();
+      if (argc >= 3) {
+        Handle<Object> date_object;
+        ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+            isolate, date_object, Object::ToNumber(args.at<Object>(3)));
+        date = date_object->Number();
+        if (argc >= 4) {
+          Handle<Object> hours_object;
+          ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+              isolate, hours_object, Object::ToNumber(args.at<Object>(4)));
+          hours = hours_object->Number();
+          if (argc >= 5) {
+            Handle<Object> minutes_object;
+            ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+                isolate, minutes_object, Object::ToNumber(args.at<Object>(5)));
+            minutes = minutes_object->Number();
+            if (argc >= 6) {
+              Handle<Object> seconds_object;
+              ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+                  isolate, seconds_object,
+                  Object::ToNumber(args.at<Object>(6)));
+              seconds = seconds_object->Number();
+              if (argc >= 7) {
+                Handle<Object> ms_object;
+                ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+                    isolate, ms_object, Object::ToNumber(args.at<Object>(7)));
+                ms = ms_object->Number();
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  if (!std::isnan(year)) {
+    double const y = DoubleToInteger(year);
+    if (0.0 <= y && y <= 99) year = 1900 + y;
+  }
+  double const day = MakeDay(year, month, date);
+  double const time = MakeTime(hours, minutes, seconds, ms);
+  return *isolate->factory()->NewNumber(TimeClip(MakeDate(day, time)));
+}
+
+
+// ES6 section 20.3.4.20 Date.prototype.setDate ( date )
+BUILTIN(DatePrototypeSetDate) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setDate");
+  Handle<Object> value = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, value, Object::ToNumber(value));
+  double time_val = date->value()->Number();
+  if (!std::isnan(time_val)) {
+    int64_t const time_ms = static_cast<int64_t>(time_val);
+    int64_t local_time_ms = isolate->date_cache()->ToLocal(time_ms);
+    int const days = isolate->date_cache()->DaysFromTime(local_time_ms);
+    int time_within_day = isolate->date_cache()->TimeInDay(local_time_ms, days);
+    int year, month, day;
+    isolate->date_cache()->YearMonthDayFromDays(days, &year, &month, &day);
+    time_val = MakeDate(MakeDay(year, month, value->Number()), time_within_day);
+  }
+  return SetLocalDateValue(date, time_val);
+}
+
+
+// ES6 section 20.3.4.21 Date.prototype.setFullYear (year, month, date)
+BUILTIN(DatePrototypeSetFullYear) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setFullYear");
+  int const argc = args.length() - 1;
+  Handle<Object> year = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, year, Object::ToNumber(year));
+  double y = year->Number(), m = 0.0, dt = 1.0;
+  int time_within_day = 0;
+  if (!std::isnan(date->value()->Number())) {
+    int64_t const time_ms = static_cast<int64_t>(date->value()->Number());
+    int64_t local_time_ms = isolate->date_cache()->ToLocal(time_ms);
+    int const days = isolate->date_cache()->DaysFromTime(local_time_ms);
+    time_within_day = isolate->date_cache()->TimeInDay(local_time_ms, days);
+    int year, month, day;
+    isolate->date_cache()->YearMonthDayFromDays(days, &year, &month, &day);
+    m = month;
+    dt = day;
+  }
+  if (argc >= 2) {
+    Handle<Object> month = args.at<Object>(2);
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, month, Object::ToNumber(month));
+    m = month->Number();
+    if (argc >= 3) {
+      Handle<Object> date = args.at<Object>(3);
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, date, Object::ToNumber(date));
+      dt = date->Number();
+    }
+  }
+  double time_val = MakeDate(MakeDay(y, m, dt), time_within_day);
+  return SetLocalDateValue(date, time_val);
+}
+
+
+// ES6 section 20.3.4.22 Date.prototype.setHours(hour, min, sec, ms)
+BUILTIN(DatePrototypeSetHours) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setHours");
+  int const argc = args.length() - 1;
+  Handle<Object> hour = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, hour, Object::ToNumber(hour));
+  double h = hour->Number();
+  double time_val = date->value()->Number();
+  if (!std::isnan(time_val)) {
+    int64_t const time_ms = static_cast<int64_t>(time_val);
+    int64_t local_time_ms = isolate->date_cache()->ToLocal(time_ms);
+    int day = isolate->date_cache()->DaysFromTime(local_time_ms);
+    int time_within_day = isolate->date_cache()->TimeInDay(local_time_ms, day);
+    double m = (time_within_day / (60 * 1000)) % 60;
+    double s = (time_within_day / 1000) % 60;
+    double milli = time_within_day % 1000;
+    if (argc >= 2) {
+      Handle<Object> min = args.at<Object>(2);
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, min, Object::ToNumber(min));
+      m = min->Number();
+      if (argc >= 3) {
+        Handle<Object> sec = args.at<Object>(3);
+        ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, sec, Object::ToNumber(sec));
+        s = sec->Number();
+        if (argc >= 4) {
+          Handle<Object> ms = args.at<Object>(4);
+          ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, ms, Object::ToNumber(ms));
+          milli = ms->Number();
+        }
+      }
+    }
+    time_val = MakeDate(day, MakeTime(h, m, s, milli));
+  }
+  return SetLocalDateValue(date, time_val);
+}
+
+
+// ES6 section 20.3.4.23 Date.prototype.setMilliseconds(ms)
+BUILTIN(DatePrototypeSetMilliseconds) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setMilliseconds");
+  Handle<Object> ms = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, ms, Object::ToNumber(ms));
+  double time_val = date->value()->Number();
+  if (!std::isnan(time_val)) {
+    int64_t const time_ms = static_cast<int64_t>(time_val);
+    int64_t local_time_ms = isolate->date_cache()->ToLocal(time_ms);
+    int day = isolate->date_cache()->DaysFromTime(local_time_ms);
+    int time_within_day = isolate->date_cache()->TimeInDay(local_time_ms, day);
+    int h = time_within_day / (60 * 60 * 1000);
+    int m = (time_within_day / (60 * 1000)) % 60;
+    int s = (time_within_day / 1000) % 60;
+    time_val = MakeDate(day, MakeTime(h, m, s, ms->Number()));
+  }
+  return SetLocalDateValue(date, time_val);
+}
+
+
+// ES6 section 20.3.4.24 Date.prototype.setMinutes ( min, sec, ms )
+BUILTIN(DatePrototypeSetMinutes) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setMinutes");
+  int const argc = args.length() - 1;
+  Handle<Object> min = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, min, Object::ToNumber(min));
+  double time_val = date->value()->Number();
+  if (!std::isnan(time_val)) {
+    int64_t const time_ms = static_cast<int64_t>(time_val);
+    int64_t local_time_ms = isolate->date_cache()->ToLocal(time_ms);
+    int day = isolate->date_cache()->DaysFromTime(local_time_ms);
+    int time_within_day = isolate->date_cache()->TimeInDay(local_time_ms, day);
+    int h = time_within_day / (60 * 60 * 1000);
+    double m = min->Number();
+    double s = (time_within_day / 1000) % 60;
+    double milli = time_within_day % 1000;
+    if (argc >= 2) {
+      Handle<Object> sec = args.at<Object>(2);
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, sec, Object::ToNumber(sec));
+      s = sec->Number();
+      if (argc >= 3) {
+        Handle<Object> ms = args.at<Object>(3);
+        ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, ms, Object::ToNumber(ms));
+        milli = ms->Number();
+      }
+    }
+    time_val = MakeDate(day, MakeTime(h, m, s, milli));
+  }
+  return SetLocalDateValue(date, time_val);
+}
+
+
+// ES6 section 20.3.4.25 Date.prototype.setMonth ( month, date )
+BUILTIN(DatePrototypeSetMonth) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setMonth");
+  int const argc = args.length() - 1;
+  Handle<Object> month = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, month, Object::ToNumber(month));
+  double time_val = date->value()->Number();
+  if (!std::isnan(time_val)) {
+    int64_t const time_ms = static_cast<int64_t>(time_val);
+    int64_t local_time_ms = isolate->date_cache()->ToLocal(time_ms);
+    int days = isolate->date_cache()->DaysFromTime(local_time_ms);
+    int time_within_day = isolate->date_cache()->TimeInDay(local_time_ms, days);
+    int year, unused, day;
+    isolate->date_cache()->YearMonthDayFromDays(days, &year, &unused, &day);
+    double m = month->Number();
+    double dt = day;
+    if (argc >= 2) {
+      Handle<Object> date = args.at<Object>(2);
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, date, Object::ToNumber(date));
+      dt = date->Number();
+    }
+    time_val = MakeDate(MakeDay(year, m, dt), time_within_day);
+  }
+  return SetLocalDateValue(date, time_val);
+}
+
+
+// ES6 section 20.3.4.26 Date.prototype.setSeconds ( sec, ms )
+BUILTIN(DatePrototypeSetSeconds) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setSeconds");
+  int const argc = args.length() - 1;
+  Handle<Object> sec = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, sec, Object::ToNumber(sec));
+  double time_val = date->value()->Number();
+  if (!std::isnan(time_val)) {
+    int64_t const time_ms = static_cast<int64_t>(time_val);
+    int64_t local_time_ms = isolate->date_cache()->ToLocal(time_ms);
+    int day = isolate->date_cache()->DaysFromTime(local_time_ms);
+    int time_within_day = isolate->date_cache()->TimeInDay(local_time_ms, day);
+    int h = time_within_day / (60 * 60 * 1000);
+    double m = (time_within_day / (60 * 1000)) % 60;
+    double s = sec->Number();
+    double milli = time_within_day % 1000;
+    if (argc >= 2) {
+      Handle<Object> ms = args.at<Object>(2);
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, ms, Object::ToNumber(ms));
+      milli = ms->Number();
+    }
+    time_val = MakeDate(day, MakeTime(h, m, s, milli));
+  }
+  return SetLocalDateValue(date, time_val);
+}
+
+
+// ES6 section 20.3.4.27 Date.prototype.setTime ( time )
+BUILTIN(DatePrototypeSetTime) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setTime");
+  Handle<Object> value = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, value, Object::ToNumber(value));
+  return *JSDate::SetValue(date, TimeClip(value->Number()));
+}
+
+
+// ES6 section 20.3.4.28 Date.prototype.setUTCDate ( date )
+BUILTIN(DatePrototypeSetUTCDate) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setUTCDate");
+  Handle<Object> value = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, value, Object::ToNumber(value));
+  if (std::isnan(date->value()->Number())) return date->value();
+  int64_t const time_ms = static_cast<int64_t>(date->value()->Number());
+  int const days = isolate->date_cache()->DaysFromTime(time_ms);
+  int const time_within_day = isolate->date_cache()->TimeInDay(time_ms, days);
+  int year, month, day;
+  isolate->date_cache()->YearMonthDayFromDays(days, &year, &month, &day);
+  double const time_val =
+      MakeDate(MakeDay(year, month, value->Number()), time_within_day);
+  return *JSDate::SetValue(date, TimeClip(time_val));
+}
+
+
+// ES6 section 20.3.4.29 Date.prototype.setUTCFullYear (year, month, date)
+BUILTIN(DatePrototypeSetUTCFullYear) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setUTCFullYear");
+  int const argc = args.length() - 1;
+  Handle<Object> year = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, year, Object::ToNumber(year));
+  double y = year->Number(), m = 0.0, dt = 1.0;
+  int time_within_day = 0;
+  if (!std::isnan(date->value()->Number())) {
+    int64_t const time_ms = static_cast<int64_t>(date->value()->Number());
+    int const days = isolate->date_cache()->DaysFromTime(time_ms);
+    time_within_day = isolate->date_cache()->TimeInDay(time_ms, days);
+    int year, month, day;
+    isolate->date_cache()->YearMonthDayFromDays(days, &year, &month, &day);
+    m = month;
+    dt = day;
+  }
+  if (argc >= 2) {
+    Handle<Object> month = args.at<Object>(2);
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, month, Object::ToNumber(month));
+    m = month->Number();
+    if (argc >= 3) {
+      Handle<Object> date = args.at<Object>(3);
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, date, Object::ToNumber(date));
+      dt = date->Number();
+    }
+  }
+  double const time_val = MakeDate(MakeDay(y, m, dt), time_within_day);
+  return *JSDate::SetValue(date, TimeClip(time_val));
+}
+
+
+// ES6 section 20.3.4.30 Date.prototype.setUTCHours(hour, min, sec, ms)
+BUILTIN(DatePrototypeSetUTCHours) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setUTCHours");
+  int const argc = args.length() - 1;
+  Handle<Object> hour = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, hour, Object::ToNumber(hour));
+  double h = hour->Number();
+  double time_val = date->value()->Number();
+  if (!std::isnan(time_val)) {
+    int64_t const time_ms = static_cast<int64_t>(time_val);
+    int day = isolate->date_cache()->DaysFromTime(time_ms);
+    int time_within_day = isolate->date_cache()->TimeInDay(time_ms, day);
+    double m = (time_within_day / (60 * 1000)) % 60;
+    double s = (time_within_day / 1000) % 60;
+    double milli = time_within_day % 1000;
+    if (argc >= 2) {
+      Handle<Object> min = args.at<Object>(2);
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, min, Object::ToNumber(min));
+      m = min->Number();
+      if (argc >= 3) {
+        Handle<Object> sec = args.at<Object>(3);
+        ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, sec, Object::ToNumber(sec));
+        s = sec->Number();
+        if (argc >= 4) {
+          Handle<Object> ms = args.at<Object>(4);
+          ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, ms, Object::ToNumber(ms));
+          milli = ms->Number();
+        }
+      }
+    }
+    time_val = MakeDate(day, MakeTime(h, m, s, milli));
+  }
+  return *JSDate::SetValue(date, TimeClip(time_val));
+}
+
+
+// ES6 section 20.3.4.31 Date.prototype.setUTCMilliseconds(ms)
+BUILTIN(DatePrototypeSetUTCMilliseconds) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setUTCMilliseconds");
+  Handle<Object> ms = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, ms, Object::ToNumber(ms));
+  double time_val = date->value()->Number();
+  if (!std::isnan(time_val)) {
+    int64_t const time_ms = static_cast<int64_t>(time_val);
+    int day = isolate->date_cache()->DaysFromTime(time_ms);
+    int time_within_day = isolate->date_cache()->TimeInDay(time_ms, day);
+    int h = time_within_day / (60 * 60 * 1000);
+    int m = (time_within_day / (60 * 1000)) % 60;
+    int s = (time_within_day / 1000) % 60;
+    time_val = MakeDate(day, MakeTime(h, m, s, ms->Number()));
+  }
+  return *JSDate::SetValue(date, TimeClip(time_val));
+}
+
+
+// ES6 section 20.3.4.32 Date.prototype.setUTCMinutes ( min, sec, ms )
+BUILTIN(DatePrototypeSetUTCMinutes) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setUTCMinutes");
+  int const argc = args.length() - 1;
+  Handle<Object> min = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, min, Object::ToNumber(min));
+  double time_val = date->value()->Number();
+  if (!std::isnan(time_val)) {
+    int64_t const time_ms = static_cast<int64_t>(time_val);
+    int day = isolate->date_cache()->DaysFromTime(time_ms);
+    int time_within_day = isolate->date_cache()->TimeInDay(time_ms, day);
+    int h = time_within_day / (60 * 60 * 1000);
+    double m = min->Number();
+    double s = (time_within_day / 1000) % 60;
+    double milli = time_within_day % 1000;
+    if (argc >= 2) {
+      Handle<Object> sec = args.at<Object>(2);
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, sec, Object::ToNumber(sec));
+      s = sec->Number();
+      if (argc >= 3) {
+        Handle<Object> ms = args.at<Object>(3);
+        ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, ms, Object::ToNumber(ms));
+        milli = ms->Number();
+      }
+    }
+    time_val = MakeDate(day, MakeTime(h, m, s, milli));
+  }
+  return *JSDate::SetValue(date, TimeClip(time_val));
+}
+
+
+// ES6 section 20.3.4.31 Date.prototype.setUTCMonth ( month, date )
+BUILTIN(DatePrototypeSetUTCMonth) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setUTCMonth");
+  int const argc = args.length() - 1;
+  Handle<Object> month = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, month, Object::ToNumber(month));
+  double time_val = date->value()->Number();
+  if (!std::isnan(time_val)) {
+    int64_t const time_ms = static_cast<int64_t>(time_val);
+    int days = isolate->date_cache()->DaysFromTime(time_ms);
+    int time_within_day = isolate->date_cache()->TimeInDay(time_ms, days);
+    int year, unused, day;
+    isolate->date_cache()->YearMonthDayFromDays(days, &year, &unused, &day);
+    double m = month->Number();
+    double dt = day;
+    if (argc >= 2) {
+      Handle<Object> date = args.at<Object>(2);
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, date, Object::ToNumber(date));
+      dt = date->Number();
+    }
+    time_val = MakeDate(MakeDay(year, m, dt), time_within_day);
+  }
+  return *JSDate::SetValue(date, TimeClip(time_val));
+}
+
+
+// ES6 section 20.3.4.34 Date.prototype.setUTCSeconds ( sec, ms )
+BUILTIN(DatePrototypeSetUTCSeconds) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setUTCSeconds");
+  int const argc = args.length() - 1;
+  Handle<Object> sec = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, sec, Object::ToNumber(sec));
+  double time_val = date->value()->Number();
+  if (!std::isnan(time_val)) {
+    int64_t const time_ms = static_cast<int64_t>(time_val);
+    int day = isolate->date_cache()->DaysFromTime(time_ms);
+    int time_within_day = isolate->date_cache()->TimeInDay(time_ms, day);
+    int h = time_within_day / (60 * 60 * 1000);
+    double m = (time_within_day / (60 * 1000)) % 60;
+    double s = sec->Number();
+    double milli = time_within_day % 1000;
+    if (argc >= 2) {
+      Handle<Object> ms = args.at<Object>(2);
+      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, ms, Object::ToNumber(ms));
+      milli = ms->Number();
+    }
+    time_val = MakeDate(day, MakeTime(h, m, s, milli));
+  }
+  return *JSDate::SetValue(date, TimeClip(time_val));
+}
+
+
+// ES6 section 20.3.4.35 Date.prototype.toDateString ( )
+BUILTIN(DatePrototypeToDateString) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.toDateString");
+  char buffer[128];
+  Vector<char> str(buffer, arraysize(buffer));
+  ToDateString(date->value()->Number(), str, isolate->date_cache(), kDateOnly);
+  return *isolate->factory()->NewStringFromAsciiChecked(str.start());
+}
+
+
+// ES6 section 20.3.4.36 Date.prototype.toISOString ( )
+BUILTIN(DatePrototypeToISOString) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.toISOString");
+  double const time_val = date->value()->Number();
+  if (std::isnan(time_val)) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewRangeError(MessageTemplate::kInvalidTimeValue));
+  }
+  int64_t const time_ms = static_cast<int64_t>(time_val);
+  int year, month, day, weekday, hour, min, sec, ms;
+  isolate->date_cache()->BreakDownTime(time_ms, &year, &month, &day, &weekday,
+                                       &hour, &min, &sec, &ms);
+  char buffer[128];
+  Vector<char> str(buffer, arraysize(buffer));
+  if (year >= 0 && year <= 9999) {
+    SNPrintF(str, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", year, month + 1, day,
+             hour, min, sec, ms);
+  } else if (year < 0) {
+    SNPrintF(str, "-%06d-%02d-%02dT%02d:%02d:%02d.%03dZ", -year, month + 1, day,
+             hour, min, sec, ms);
+  } else {
+    SNPrintF(str, "+%06d-%02d-%02dT%02d:%02d:%02d.%03dZ", year, month + 1, day,
+             hour, min, sec, ms);
+  }
+  return *isolate->factory()->NewStringFromAsciiChecked(str.start());
+}
+
+
+// ES6 section 20.3.4.41 Date.prototype.toString ( )
+BUILTIN(DatePrototypeToString) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.toString");
+  char buffer[128];
+  Vector<char> str(buffer, arraysize(buffer));
+  ToDateString(date->value()->Number(), str, isolate->date_cache());
+  return *isolate->factory()->NewStringFromAsciiChecked(str.start());
+}
+
+
+// ES6 section 20.3.4.42 Date.prototype.toTimeString ( )
+BUILTIN(DatePrototypeToTimeString) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.toTimeString");
+  char buffer[128];
+  Vector<char> str(buffer, arraysize(buffer));
+  ToDateString(date->value()->Number(), str, isolate->date_cache(), kTimeOnly);
+  return *isolate->factory()->NewStringFromAsciiChecked(str.start());
+}
+
+
+// ES6 section 20.3.4.43 Date.prototype.toUTCString ( )
+BUILTIN(DatePrototypeToUTCString) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.toUTCString");
+  double const time_val = date->value()->Number();
+  if (std::isnan(time_val)) {
+    return *isolate->factory()->NewStringFromAsciiChecked("Invalid Date");
+  }
+  char buffer[128];
+  Vector<char> str(buffer, arraysize(buffer));
+  int64_t time_ms = static_cast<int64_t>(time_val);
+  int year, month, day, weekday, hour, min, sec, ms;
+  isolate->date_cache()->BreakDownTime(time_ms, &year, &month, &day, &weekday,
+                                       &hour, &min, &sec, &ms);
+  SNPrintF(str, "%s, %02d %s %4d %02d:%02d:%02d GMT", kShortWeekDays[weekday],
+           day, kShortMonths[month], year, hour, min, sec);
+  return *isolate->factory()->NewStringFromAsciiChecked(str.start());
+}
+
+
+// ES6 section 20.3.4.44 Date.prototype.valueOf ( )
+BUILTIN(DatePrototypeValueOf) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.valueOf");
+  return date->value();
+}
+
+
 // ES6 section 20.3.4.45 Date.prototype [ @@toPrimitive ] ( hint )
-BUILTIN(DateToPrimitive) {
+BUILTIN(DatePrototypeToPrimitive) {
   HandleScope scope(isolate);
   DCHECK_EQ(2, args.length());
-  if (!args.receiver()->IsJSReceiver()) {
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewTypeError(MessageTemplate::kIncompatibleMethodReceiver,
-                              isolate->factory()->NewStringFromAsciiChecked(
-                                  "Date.prototype [ @@toPrimitive ]"),
-                              args.receiver()));
-  }
-  Handle<JSReceiver> receiver = args.at<JSReceiver>(0);
+  CHECK_RECEIVER(JSReceiver, receiver, "Date.prototype [ @@toPrimitive ]");
   Handle<Object> hint = args.at<Object>(1);
   Handle<Object> result;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, result,
@@ -1728,12 +3103,375 @@ BUILTIN(DateToPrimitive) {
 }
 
 
+// ES6 section B.2.4.1 Date.prototype.getYear ( )
+BUILTIN(DatePrototypeGetYear) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.getYear");
+  double time_val = date->value()->Number();
+  if (std::isnan(time_val)) return date->value();
+  int64_t time_ms = static_cast<int64_t>(time_val);
+  int64_t local_time_ms = isolate->date_cache()->ToLocal(time_ms);
+  int days = isolate->date_cache()->DaysFromTime(local_time_ms);
+  int year, month, day;
+  isolate->date_cache()->YearMonthDayFromDays(days, &year, &month, &day);
+  return Smi::FromInt(year - 1900);
+}
+
+
+// ES6 section B.2.4.2 Date.prototype.setYear ( year )
+BUILTIN(DatePrototypeSetYear) {
+  HandleScope scope(isolate);
+  CHECK_RECEIVER(JSDate, date, "Date.prototype.setYear");
+  Handle<Object> year = args.atOrUndefined(isolate, 1);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, year, Object::ToNumber(year));
+  double m = 0.0, dt = 1.0, y = year->Number();
+  if (0.0 <= y && y <= 99.0) {
+    y = 1900.0 + DoubleToInteger(y);
+  }
+  int time_within_day = 0;
+  if (!std::isnan(date->value()->Number())) {
+    int64_t const time_ms = static_cast<int64_t>(date->value()->Number());
+    int64_t local_time_ms = isolate->date_cache()->ToLocal(time_ms);
+    int const days = isolate->date_cache()->DaysFromTime(local_time_ms);
+    time_within_day = isolate->date_cache()->TimeInDay(local_time_ms, days);
+    int year, month, day;
+    isolate->date_cache()->YearMonthDayFromDays(days, &year, &month, &day);
+    m = month;
+    dt = day;
+  }
+  double time_val = MakeDate(MakeDay(y, m, dt), time_within_day);
+  return SetLocalDateValue(date, time_val);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetDate(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kDay);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetDay(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kWeekday);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetFullYear(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kYear);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetHours(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kHour);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetMilliseconds(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kMillisecond);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetMinutes(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kMinute);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetMonth(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kMonth);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetSeconds(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kSecond);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetTime(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kDateValue);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetTimezoneOffset(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kTimezoneOffset);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetUTCDate(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kDayUTC);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetUTCDay(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kWeekdayUTC);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetUTCFullYear(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kYearUTC);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetUTCHours(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kHourUTC);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetUTCMilliseconds(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kMillisecondUTC);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetUTCMinutes(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kMinuteUTC);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetUTCMonth(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kMonthUTC);
+}
+
+
+// static
+void Builtins::Generate_DatePrototypeGetUTCSeconds(MacroAssembler* masm) {
+  Generate_DatePrototype_GetField(masm, JSDate::kSecondUTC);
+}
+
+
+namespace {
+
+// ES6 section 19.2.1.1.1 CreateDynamicFunction
+MaybeHandle<JSFunction> CreateDynamicFunction(
+    Isolate* isolate,
+    BuiltinArguments<BuiltinExtraArguments::kTargetAndNewTarget> args,
+    const char* token) {
+  // Compute number of arguments, ignoring the receiver.
+  DCHECK_LE(1, args.length());
+  int const argc = args.length() - 1;
+
+  // Build the source string.
+  Handle<String> source;
+  {
+    IncrementalStringBuilder builder(isolate);
+    builder.AppendCharacter('(');
+    builder.AppendCString(token);
+    builder.AppendCharacter('(');
+    bool parenthesis_in_arg_string = false;
+    if (argc > 1) {
+      for (int i = 1; i < argc; ++i) {
+        if (i > 1) builder.AppendCharacter(',');
+        Handle<String> param;
+        ASSIGN_RETURN_ON_EXCEPTION(
+            isolate, param, Object::ToString(isolate, args.at<Object>(i)),
+            JSFunction);
+        param = String::Flatten(param);
+        builder.AppendString(param);
+        // If the formal parameters string include ) - an illegal
+        // character - it may make the combined function expression
+        // compile. We avoid this problem by checking for this early on.
+        DisallowHeapAllocation no_gc;  // Ensure vectors stay valid.
+        String::FlatContent param_content = param->GetFlatContent();
+        for (int i = 0, length = param->length(); i < length; ++i) {
+          if (param_content.Get(i) == ')') {
+            parenthesis_in_arg_string = true;
+            break;
+          }
+        }
+      }
+      // If the formal parameters include an unbalanced block comment, the
+      // function must be rejected. Since JavaScript does not allow nested
+      // comments we can include a trailing block comment to catch this.
+      builder.AppendCString("\n/**/");
+    }
+    builder.AppendCString(") {\n");
+    if (argc > 0) {
+      Handle<String> body;
+      ASSIGN_RETURN_ON_EXCEPTION(
+          isolate, body, Object::ToString(isolate, args.at<Object>(argc)),
+          JSFunction);
+      builder.AppendString(body);
+    }
+    builder.AppendCString("\n})");
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, source, builder.Finish(), JSFunction);
+
+    // The SyntaxError must be thrown after all the (observable) ToString
+    // conversions are done.
+    if (parenthesis_in_arg_string) {
+      THROW_NEW_ERROR(isolate,
+                      NewSyntaxError(MessageTemplate::kParenthesisInArgString),
+                      JSFunction);
+    }
+  }
+
+  // Compile the string in the constructor and not a helper so that errors to
+  // come from here.
+  Handle<JSFunction> target = args.target();
+  Handle<JSObject> target_global_proxy(target->global_proxy(), isolate);
+  Handle<JSFunction> function;
+  {
+    ASSIGN_RETURN_ON_EXCEPTION(
+        isolate, function,
+        CompileString(handle(target->native_context(), isolate), source,
+                      ONLY_SINGLE_FUNCTION_LITERAL),
+        JSFunction);
+    Handle<Object> result;
+    ASSIGN_RETURN_ON_EXCEPTION(
+        isolate, result,
+        Execution::Call(isolate, function, target_global_proxy, 0, nullptr),
+        JSFunction);
+    function = Handle<JSFunction>::cast(result);
+    function->shared()->set_name_should_print_as_anonymous(true);
+  }
+
+  // If new.target is equal to target then the function created
+  // is already correctly setup and nothing else should be done
+  // here. But if new.target is not equal to target then we are
+  // have a Function builtin subclassing case and therefore the
+  // function has wrong initial map. To fix that we create a new
+  // function object with correct initial map.
+  Handle<Object> unchecked_new_target = args.new_target();
+  if (!unchecked_new_target->IsUndefined() &&
+      !unchecked_new_target.is_identical_to(target)) {
+    Handle<JSReceiver> new_target =
+        Handle<JSReceiver>::cast(unchecked_new_target);
+    Handle<Map> initial_map;
+    ASSIGN_RETURN_ON_EXCEPTION(
+        isolate, initial_map,
+        JSFunction::GetDerivedMap(isolate, target, new_target), JSFunction);
+
+    Handle<SharedFunctionInfo> shared_info(function->shared(), isolate);
+    Handle<Map> map = Map::AsLanguageMode(
+        initial_map, shared_info->language_mode(), shared_info->kind());
+
+    Handle<Context> context(function->context(), isolate);
+    function = isolate->factory()->NewFunctionFromSharedFunctionInfo(
+        map, shared_info, context, NOT_TENURED);
+  }
+  return function;
+}
+
+}  // namespace
+
+
+// ES6 section 19.2.1.1 Function ( p1, p2, ... , pn, body )
+BUILTIN(FunctionConstructor) {
+  HandleScope scope(isolate);
+  Handle<JSFunction> result;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, result, CreateDynamicFunction(isolate, args, "function"));
+  return *result;
+}
+
+
+// ES6 section 19.2.3.2 Function.prototype.bind ( thisArg, ...args )
+BUILTIN(FunctionPrototypeBind) {
+  HandleScope scope(isolate);
+  DCHECK_LE(1, args.length());
+  if (!args.receiver()->IsCallable()) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewTypeError(MessageTemplate::kFunctionBind));
+  }
+
+  // Allocate the bound function with the given {this_arg} and {args}.
+  Handle<JSReceiver> target = args.at<JSReceiver>(0);
+  Handle<Object> this_arg = isolate->factory()->undefined_value();
+  ScopedVector<Handle<Object>> argv(std::max(0, args.length() - 2));
+  if (args.length() > 1) {
+    this_arg = args.at<Object>(1);
+    for (int i = 2; i < args.length(); ++i) {
+      argv[i - 2] = args.at<Object>(i);
+    }
+  }
+  Handle<JSBoundFunction> function;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, function,
+      isolate->factory()->NewJSBoundFunction(target, this_arg, argv));
+
+  // TODO(bmeurer): Optimize the rest for the common cases where {target} is
+  // a function with some initial map or even a bound function.
+  // Setup the "length" property based on the "length" of the {target}.
+  Handle<Object> length(Smi::FromInt(0), isolate);
+  Maybe<bool> target_has_length =
+      JSReceiver::HasOwnProperty(target, isolate->factory()->length_string());
+  if (!target_has_length.IsJust()) {
+    return isolate->heap()->exception();
+  } else if (target_has_length.FromJust()) {
+    Handle<Object> target_length;
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, target_length,
+        JSReceiver::GetProperty(target, isolate->factory()->length_string()));
+    if (target_length->IsNumber()) {
+      length = isolate->factory()->NewNumber(std::max(
+          0.0, DoubleToInteger(target_length->Number()) - argv.length()));
+    }
+  }
+  function->set_length(*length);
+
+  // Setup the "name" property based on the "name" of the {target}.
+  Handle<Object> target_name;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, target_name,
+      JSReceiver::GetProperty(target, isolate->factory()->name_string()));
+  Handle<String> name;
+  if (!target_name->IsString()) {
+    name = isolate->factory()->bound__string();
+  } else {
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, name, Name::ToFunctionName(Handle<String>::cast(target_name)));
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, name, isolate->factory()->NewConsString(
+                           isolate->factory()->bound__string(), name));
+  }
+  function->set_name(*name);
+  return *function;
+}
+
+
+// ES6 section 19.2.3.5 Function.prototype.toString ( )
+BUILTIN(FunctionPrototypeToString) {
+  HandleScope scope(isolate);
+  Handle<Object> receiver = args.receiver();
+  if (receiver->IsJSBoundFunction()) {
+    return *JSBoundFunction::ToString(Handle<JSBoundFunction>::cast(receiver));
+  } else if (receiver->IsJSFunction()) {
+    return *JSFunction::ToString(Handle<JSFunction>::cast(receiver));
+  }
+  THROW_NEW_ERROR_RETURN_FAILURE(
+      isolate, NewTypeError(MessageTemplate::kNotGeneric,
+                            isolate->factory()->NewStringFromAsciiChecked(
+                                "Function.prototype.toString")));
+}
+
+
+// ES6 section 25.2.1.1 GeneratorFunction (p1, p2, ... , pn, body)
+BUILTIN(GeneratorFunctionConstructor) {
+  HandleScope scope(isolate);
+  Handle<JSFunction> result;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, result, CreateDynamicFunction(isolate, args, "function*"));
+  return *result;
+}
+
+
 // ES6 section 19.4.1.1 Symbol ( [ description ] ) for the [[Call]] case.
 BUILTIN(SymbolConstructor) {
   HandleScope scope(isolate);
-  DCHECK_EQ(2, args.length());
   Handle<Symbol> result = isolate->factory()->NewSymbol();
-  Handle<Object> description = args.at<Object>(1);
+  Handle<Object> description = args.atOrUndefined(isolate, 1);
   if (!description->IsUndefined()) {
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, description,
                                        Object::ToString(isolate, description));
@@ -1746,44 +3484,81 @@ BUILTIN(SymbolConstructor) {
 // ES6 section 19.4.1.1 Symbol ( [ description ] ) for the [[Construct]] case.
 BUILTIN(SymbolConstructor_ConstructStub) {
   HandleScope scope(isolate);
-  // The ConstructStub is executed in the context of the caller, so we need
-  // to enter the callee context first before raising an exception.
-  isolate->set_context(args.target()->context());
   THROW_NEW_ERROR_RETURN_FAILURE(
       isolate, NewTypeError(MessageTemplate::kNotConstructor,
                             isolate->factory()->Symbol_string()));
 }
 
 
-namespace {
-
-// ES6 section 9.5.15 ProxyCreate (target, handler)
-MaybeHandle<JSProxy> ProxyCreate(Isolate* isolate, Handle<Object> target,
-                                 Handle<Object> handler) {
-  if (!target->IsJSReceiver()) {
-    THROW_NEW_ERROR(
-        isolate, NewTypeError(MessageTemplate::kProxyTargetNonObject), JSProxy);
-  }
-  if (target->IsJSProxy() && JSProxy::cast(*target)->IsRevoked()) {
-    THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kProxyHandlerOrTargetRevoked),
-                    JSProxy);
-  }
-  if (!handler->IsJSReceiver()) {
-    THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kProxyHandlerNonObject),
-                    JSProxy);
-  }
-  if (handler->IsJSProxy() && JSProxy::cast(*handler)->IsRevoked()) {
-    THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kProxyHandlerOrTargetRevoked),
-                    JSProxy);
-  }
-  return isolate->factory()->NewJSProxy(Handle<JSReceiver>::cast(target),
-                                        Handle<JSReceiver>::cast(handler));
+// ES6 19.1.3.6 Object.prototype.toString
+BUILTIN(ObjectProtoToString) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.at<Object>(0);
+  Handle<String> result;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, result, JSObject::ObjectProtoToString(isolate, object));
+  return *result;
 }
 
-}  // namespace
+
+// ES6 section 24.1.2.1 ArrayBuffer ( length ) for the [[Call]] case.
+BUILTIN(ArrayBufferConstructor) {
+  HandleScope scope(isolate);
+  Handle<JSFunction> target = args.target();
+  DCHECK(*target == target->native_context()->array_buffer_fun() ||
+         *target == target->native_context()->shared_array_buffer_fun());
+  THROW_NEW_ERROR_RETURN_FAILURE(
+      isolate, NewTypeError(MessageTemplate::kConstructorNotFunction,
+                            handle(target->shared()->name(), isolate)));
+}
+
+
+// ES6 section 24.1.2.1 ArrayBuffer ( length ) for the [[Construct]] case.
+BUILTIN(ArrayBufferConstructor_ConstructStub) {
+  HandleScope scope(isolate);
+  Handle<JSFunction> target = args.target();
+  Handle<JSReceiver> new_target = Handle<JSReceiver>::cast(args.new_target());
+  Handle<Object> length = args.atOrUndefined(isolate, 1);
+  DCHECK(*target == target->native_context()->array_buffer_fun() ||
+         *target == target->native_context()->shared_array_buffer_fun());
+  Handle<Object> number_length;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, number_length,
+                                     Object::ToInteger(isolate, length));
+  if (number_length->Number() < 0.0) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewRangeError(MessageTemplate::kInvalidArrayBufferLength));
+  }
+  Handle<Map> initial_map;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, initial_map,
+      JSFunction::GetDerivedMap(isolate, target, new_target));
+  size_t byte_length;
+  if (!TryNumberToSize(isolate, *number_length, &byte_length)) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewRangeError(MessageTemplate::kInvalidArrayBufferLength));
+  }
+  Handle<JSArrayBuffer> result = Handle<JSArrayBuffer>::cast(
+      isolate->factory()->NewJSObjectFromMap(initial_map));
+  SharedFlag shared_flag =
+      (*target == target->native_context()->array_buffer_fun())
+          ? SharedFlag::kNotShared
+          : SharedFlag::kShared;
+  if (!JSArrayBuffer::SetupAllocatingData(result, isolate, byte_length, true,
+                                          shared_flag)) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewRangeError(MessageTemplate::kArrayBufferAllocationFailed));
+  }
+  return *result;
+}
+
+
+// ES6 section 24.1.3.1 ArrayBuffer.isView ( arg )
+BUILTIN(ArrayBufferIsView) {
+  SealHandleScope shs(isolate);
+  DCHECK_EQ(2, args.length());
+  Object* arg = args[1];
+  return isolate->heap()->ToBoolean(arg->IsJSArrayBufferView());
+}
 
 
 // ES6 section 26.2.1.1 Proxy ( target, handler ) for the [[Call]] case.
@@ -1799,15 +3574,12 @@ BUILTIN(ProxyConstructor) {
 // ES6 section 26.2.1.1 Proxy ( target, handler ) for the [[Construct]] case.
 BUILTIN(ProxyConstructor_ConstructStub) {
   HandleScope scope(isolate);
-  DCHECK_EQ(3, args.length());
-  Handle<Object> target = args.at<Object>(1);
-  Handle<Object> handler = args.at<Object>(2);
-  // The ConstructStub is executed in the context of the caller, so we need
-  // to enter the callee context first before raising an exception.
-  isolate->set_context(args.target()->context());
+  DCHECK(isolate->proxy_function()->IsConstructor());
+  Handle<Object> target = args.atOrUndefined(isolate, 1);
+  Handle<Object> handler = args.atOrUndefined(isolate, 2);
   Handle<JSProxy> result;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, result,
-                                     ProxyCreate(isolate, target, handler));
+                                     JSProxy::New(isolate, target, handler));
   return *result;
 }
 
@@ -1842,24 +3614,33 @@ MUST_USE_RESULT MaybeHandle<Object> HandleApiCallHelper(
     Isolate* isolate, BuiltinArguments<BuiltinExtraArguments::kTarget> args) {
   HandleScope scope(isolate);
   Handle<JSFunction> function = args.target();
+  Handle<JSReceiver> receiver;
   // TODO(ishell): turn this back to a DCHECK.
   CHECK(function->shared()->IsApiFunction());
 
   Handle<FunctionTemplateInfo> fun_data(
       function->shared()->get_api_func_data(), isolate);
   if (is_construct) {
-    ASSIGN_RETURN_ON_EXCEPTION(
-        isolate, fun_data,
-        ApiNatives::ConfigureInstance(isolate, fun_data,
-                                      Handle<JSObject>::cast(args.receiver())),
-        Object);
+    DCHECK(args.receiver()->IsTheHole());
+    if (fun_data->instance_template()->IsUndefined()) {
+      v8::Local<ObjectTemplate> templ =
+          ObjectTemplate::New(reinterpret_cast<v8::Isolate*>(isolate),
+                              ToApiHandle<v8::FunctionTemplate>(fun_data));
+      fun_data->set_instance_template(*Utils::OpenHandle(*templ));
+    }
+    Handle<ObjectTemplateInfo> instance_template(
+        ObjectTemplateInfo::cast(fun_data->instance_template()), isolate);
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
+                               ApiNatives::InstantiateObject(instance_template),
+                               Object);
+    args[0] = *receiver;
+    DCHECK_EQ(*receiver, *args.receiver());
+  } else {
+    DCHECK(args.receiver()->IsJSReceiver());
+    receiver = args.at<JSReceiver>(0);
   }
 
-  DCHECK(!args[0]->IsNull());
-  if (args[0]->IsUndefined()) args[0] = function->global_proxy();
-
   if (!is_construct && !fun_data->accept_any_receiver()) {
-    Handle<Object> receiver(&args[0]);
     if (receiver->IsJSObject() && receiver->IsAccessCheckNeeded()) {
       Handle<JSObject> js_receiver = Handle<JSObject>::cast(receiver);
       if (!isolate->MayAccess(handle(isolate->context()), js_receiver)) {
@@ -1869,7 +3650,7 @@ MUST_USE_RESULT MaybeHandle<Object> HandleApiCallHelper(
     }
   }
 
-  Object* raw_holder = fun_data->GetCompatibleReceiver(isolate, args[0]);
+  Object* raw_holder = fun_data->GetCompatibleReceiver(isolate, *receiver);
 
   if (raw_holder->IsNull()) {
     // This function cannot be called with the given receiver.  Abort!
@@ -1913,7 +3694,7 @@ MUST_USE_RESULT MaybeHandle<Object> HandleApiCallHelper(
     }
   }
 
-  return scope.CloseAndEscape(args.receiver());
+  return scope.CloseAndEscape(receiver);
 }
 
 }  // namespace
@@ -1936,29 +3717,68 @@ BUILTIN(HandleApiCallConstruct) {
   return *result;
 }
 
-
-Handle<Code> Builtins::CallFunction(ConvertReceiverMode mode) {
-  switch (mode) {
-    case ConvertReceiverMode::kNullOrUndefined:
-      return CallFunction_ReceiverIsNullOrUndefined();
-    case ConvertReceiverMode::kNotNullOrUndefined:
-      return CallFunction_ReceiverIsNotNullOrUndefined();
-    case ConvertReceiverMode::kAny:
-      return CallFunction_ReceiverIsAny();
+Handle<Code> Builtins::CallFunction(ConvertReceiverMode mode,
+                                    TailCallMode tail_call_mode) {
+  switch (tail_call_mode) {
+    case TailCallMode::kDisallow:
+      switch (mode) {
+        case ConvertReceiverMode::kNullOrUndefined:
+          return CallFunction_ReceiverIsNullOrUndefined();
+        case ConvertReceiverMode::kNotNullOrUndefined:
+          return CallFunction_ReceiverIsNotNullOrUndefined();
+        case ConvertReceiverMode::kAny:
+          return CallFunction_ReceiverIsAny();
+      }
+      break;
+    case TailCallMode::kAllow:
+      switch (mode) {
+        case ConvertReceiverMode::kNullOrUndefined:
+          return TailCallFunction_ReceiverIsNullOrUndefined();
+        case ConvertReceiverMode::kNotNullOrUndefined:
+          return TailCallFunction_ReceiverIsNotNullOrUndefined();
+        case ConvertReceiverMode::kAny:
+          return TailCallFunction_ReceiverIsAny();
+      }
+      break;
   }
   UNREACHABLE();
   return Handle<Code>::null();
 }
 
+Handle<Code> Builtins::Call(ConvertReceiverMode mode,
+                            TailCallMode tail_call_mode) {
+  switch (tail_call_mode) {
+    case TailCallMode::kDisallow:
+      switch (mode) {
+        case ConvertReceiverMode::kNullOrUndefined:
+          return Call_ReceiverIsNullOrUndefined();
+        case ConvertReceiverMode::kNotNullOrUndefined:
+          return Call_ReceiverIsNotNullOrUndefined();
+        case ConvertReceiverMode::kAny:
+          return Call_ReceiverIsAny();
+      }
+      break;
+    case TailCallMode::kAllow:
+      switch (mode) {
+        case ConvertReceiverMode::kNullOrUndefined:
+          return TailCall_ReceiverIsNullOrUndefined();
+        case ConvertReceiverMode::kNotNullOrUndefined:
+          return TailCall_ReceiverIsNotNullOrUndefined();
+        case ConvertReceiverMode::kAny:
+          return TailCall_ReceiverIsAny();
+      }
+      break;
+  }
+  UNREACHABLE();
+  return Handle<Code>::null();
+}
 
-Handle<Code> Builtins::Call(ConvertReceiverMode mode) {
-  switch (mode) {
-    case ConvertReceiverMode::kNullOrUndefined:
-      return Call_ReceiverIsNullOrUndefined();
-    case ConvertReceiverMode::kNotNullOrUndefined:
-      return Call_ReceiverIsNotNullOrUndefined();
-    case ConvertReceiverMode::kAny:
-      return Call_ReceiverIsAny();
+Handle<Code> Builtins::CallBoundFunction(TailCallMode tail_call_mode) {
+  switch (tail_call_mode) {
+    case TailCallMode::kDisallow:
+      return CallBoundFunction();
+    case TailCallMode::kAllow:
+      return TailCallBoundFunction();
   }
   UNREACHABLE();
   return Handle<Code>::null();
@@ -2407,12 +4227,12 @@ const char* Builtins::Lookup(byte* pc) {
 
 
 void Builtins::Generate_InterruptCheck(MacroAssembler* masm) {
-  masm->TailCallRuntime(Runtime::kInterrupt, 0, 1);
+  masm->TailCallRuntime(Runtime::kInterrupt);
 }
 
 
 void Builtins::Generate_StackCheck(MacroAssembler* masm) {
-  masm->TailCallRuntime(Runtime::kStackGuard, 0, 1);
+  masm->TailCallRuntime(Runtime::kStackGuard);
 }
 
 

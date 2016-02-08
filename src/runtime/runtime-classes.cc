@@ -81,8 +81,7 @@ RUNTIME_FUNCTION(Runtime_HomeObjectSymbol) {
   return isolate->heap()->home_object_symbol();
 }
 
-
-static MaybeHandle<Object> DefineClass(Isolate* isolate, Handle<Object> name,
+static MaybeHandle<Object> DefineClass(Isolate* isolate,
                                        Handle<Object> super_class,
                                        Handle<JSFunction> constructor,
                                        int start_position, int end_position) {
@@ -138,17 +137,12 @@ static MaybeHandle<Object> DefineClass(Isolate* isolate, Handle<Object> name,
   map->SetConstructor(*constructor);
   Handle<JSObject> prototype = isolate->factory()->NewJSObjectFromMap(map);
 
-  Handle<String> name_string = name->IsString()
-                                   ? Handle<String>::cast(name)
-                                   : isolate->factory()->empty_string();
-  constructor->shared()->set_name(*name_string);
-
   if (!super_class->IsTheHole()) {
     // Derived classes, just like builtins, don't create implicit receivers in
     // [[construct]]. Instead they just set up new.target and call into the
     // constructor. Hence we can reuse the builtins construct stub for derived
     // classes.
-    Handle<Code> stub(isolate->builtins()->JSBuiltinsConstructStub());
+    Handle<Code> stub(isolate->builtins()->JSBuiltinsConstructStubForDerived());
     constructor->shared()->set_construct_stub(*stub);
   }
 
@@ -195,32 +189,17 @@ static MaybeHandle<Object> DefineClass(Isolate* isolate, Handle<Object> name,
 
 RUNTIME_FUNCTION(Runtime_DefineClass) {
   HandleScope scope(isolate);
-  DCHECK(args.length() == 5);
-  CONVERT_ARG_HANDLE_CHECKED(Object, name, 0);
-  CONVERT_ARG_HANDLE_CHECKED(Object, super_class, 1);
-  CONVERT_ARG_HANDLE_CHECKED(JSFunction, constructor, 2);
-  CONVERT_SMI_ARG_CHECKED(start_position, 3);
-  CONVERT_SMI_ARG_CHECKED(end_position, 4);
+  DCHECK(args.length() == 4);
+  CONVERT_ARG_HANDLE_CHECKED(Object, super_class, 0);
+  CONVERT_ARG_HANDLE_CHECKED(JSFunction, constructor, 1);
+  CONVERT_SMI_ARG_CHECKED(start_position, 2);
+  CONVERT_SMI_ARG_CHECKED(end_position, 3);
 
   Handle<Object> result;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-      isolate, result, DefineClass(isolate, name, super_class, constructor,
+      isolate, result, DefineClass(isolate, super_class, constructor,
                                    start_position, end_position));
   return *result;
-}
-
-
-RUNTIME_FUNCTION(Runtime_DefineClassMethod) {
-  HandleScope scope(isolate);
-  DCHECK(args.length() == 3);
-  CONVERT_ARG_HANDLE_CHECKED(JSObject, object, 0);
-  CONVERT_ARG_HANDLE_CHECKED(Name, name, 1);
-  CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 2);
-
-  RETURN_FAILURE_ON_EXCEPTION(isolate,
-                              JSObject::DefinePropertyOrElementIgnoreAttributes(
-                                  object, name, function, DONT_ENUM));
-  return isolate->heap()->undefined_value();
 }
 
 
@@ -242,31 +221,6 @@ RUNTIME_FUNCTION(Runtime_FinalizeClassDefinition) {
                  isolate->heap()->exception());
   }
   return *constructor;
-}
-
-
-RUNTIME_FUNCTION(Runtime_ClassGetSourceCode) {
-  HandleScope shs(isolate);
-  DCHECK(args.length() == 1);
-  CONVERT_ARG_HANDLE_CHECKED(JSFunction, fun, 0);
-
-  Handle<Symbol> start_position_symbol(
-      isolate->heap()->class_start_position_symbol());
-  Handle<Object> start_position =
-      JSReceiver::GetDataProperty(fun, start_position_symbol);
-  if (!start_position->IsSmi()) return isolate->heap()->undefined_value();
-
-  Handle<Symbol> end_position_symbol(
-      isolate->heap()->class_end_position_symbol());
-  Handle<Object> end_position =
-      JSReceiver::GetDataProperty(fun, end_position_symbol);
-  CHECK(end_position->IsSmi());
-
-  Handle<String> source(
-      String::cast(Script::cast(fun->shared()->script())->source()));
-  return *isolate->factory()->NewSubString(
-      source, Handle<Smi>::cast(start_position)->value(),
-      Handle<Smi>::cast(end_position)->value());
 }
 
 
@@ -489,24 +443,11 @@ RUNTIME_FUNCTION(Runtime_StoreKeyedToSuper_Sloppy) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_DefaultConstructorCallSuper) {
-  HandleScope scope(isolate);
-  DCHECK(args.length() == 2);
-  CONVERT_ARG_HANDLE_CHECKED(JSFunction, new_target, 0);
-  CONVERT_ARG_HANDLE_CHECKED(JSFunction, super_constructor, 1);
-  JavaScriptFrameIterator it(isolate);
-
-  // Determine the actual arguments passed to the function.
-  int argument_count = 0;
-  base::SmartArrayPointer<Handle<Object>> arguments =
-      Runtime::GetCallerArguments(isolate, 0, &argument_count);
-
-  Handle<Object> result;
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-      isolate, result, Execution::New(isolate, super_constructor, new_target,
-                                      argument_count, arguments.get()));
-
-  return *result;
+RUNTIME_FUNCTION(Runtime_GetSuperConstructor) {
+  SealHandleScope shs(isolate);
+  DCHECK_EQ(1, args.length());
+  CONVERT_ARG_CHECKED(JSFunction, active_function, 0);
+  return active_function->map()->prototype();
 }
 
 }  // namespace internal

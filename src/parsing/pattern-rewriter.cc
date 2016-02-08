@@ -26,18 +26,19 @@ void Parser::PatternRewriter::DeclareAndInitializeVariables(
   rewriter.descriptor_ = declaration_descriptor;
   rewriter.names_ = names;
   rewriter.ok_ = ok;
+  rewriter.recursion_level_ = 0;
 
   rewriter.RecurseIntoSubpattern(rewriter.pattern_, declaration->initializer);
 }
 
 
 void Parser::PatternRewriter::RewriteDestructuringAssignment(
-    Parser* parser, RewritableAssignmentExpression* to_rewrite, Scope* scope,
-    bool* ok) {
+    Parser* parser, RewritableAssignmentExpression* to_rewrite, Scope* scope) {
   PatternRewriter rewriter;
 
   DCHECK(!to_rewrite->is_rewritten());
 
+  bool ok = true;
   rewriter.scope_ = scope;
   rewriter.parser_ = parser;
   rewriter.context_ = ASSIGNMENT;
@@ -45,9 +46,22 @@ void Parser::PatternRewriter::RewriteDestructuringAssignment(
   rewriter.block_ = nullptr;
   rewriter.descriptor_ = nullptr;
   rewriter.names_ = nullptr;
-  rewriter.ok_ = ok;
+  rewriter.ok_ = &ok;
+  rewriter.recursion_level_ = 0;
 
   rewriter.RecurseIntoSubpattern(rewriter.pattern_, nullptr);
+  DCHECK(ok);
+}
+
+
+Expression* Parser::PatternRewriter::RewriteDestructuringAssignment(
+    Parser* parser, Assignment* assignment, Scope* scope) {
+  DCHECK_NOT_NULL(assignment);
+  DCHECK_EQ(Token::ASSIGN, assignment->op());
+  auto to_rewrite =
+      parser->factory()->NewRewritableAssignmentExpression(assignment);
+  RewriteDestructuringAssignment(parser, to_rewrite, scope);
+  return to_rewrite->expression();
 }
 
 
@@ -105,7 +119,7 @@ void Parser::PatternRewriter::VisitVariableProxy(VariableProxy* pattern) {
     Assignment* assignment = factory()->NewAssignment(
         Token::ASSIGN, pattern, value, pattern->position());
     block_->statements()->Add(
-        factory()->NewExpressionStatement(assignment, RelocInfo::kNoPosition),
+        factory()->NewExpressionStatement(assignment, pattern->position()),
         zone());
     return;
   }
@@ -268,11 +282,12 @@ void Parser::PatternRewriter::VisitVariableProxy(VariableProxy* pattern) {
     DCHECK_NOT_NULL(proxy);
     DCHECK_NOT_NULL(proxy->var());
     DCHECK_NOT_NULL(value);
-    Assignment* assignment = factory()->NewAssignment(
-        Token::INIT, proxy, value, descriptor_->initialization_pos);
+    // Add break location for destructured sub-pattern.
+    int pos = IsSubPattern() ? pattern->position() : RelocInfo::kNoPosition;
+    Assignment* assignment =
+        factory()->NewAssignment(Token::INIT, proxy, value, pos);
     block_->statements()->Add(
-        factory()->NewExpressionStatement(assignment, RelocInfo::kNoPosition),
-        zone());
+        factory()->NewExpressionStatement(assignment, pos), zone());
     value = NULL;
   }
 
@@ -284,11 +299,12 @@ void Parser::PatternRewriter::VisitVariableProxy(VariableProxy* pattern) {
     // if they are inside a 'with' statement - they may change a 'with' object
     // property).
     VariableProxy* proxy = initialization_scope->NewUnresolved(factory(), name);
-    Assignment* assignment = factory()->NewAssignment(
-        Token::INIT, proxy, value, descriptor_->initialization_pos);
+    // Add break location for destructured sub-pattern.
+    int pos = IsSubPattern() ? pattern->position() : RelocInfo::kNoPosition;
+    Assignment* assignment =
+        factory()->NewAssignment(Token::INIT, proxy, value, pos);
     block_->statements()->Add(
-        factory()->NewExpressionStatement(assignment, RelocInfo::kNoPosition),
-        zone());
+        factory()->NewExpressionStatement(assignment, pos), zone());
   }
 }
 

@@ -13,6 +13,8 @@ namespace v8 {
 namespace internal {
 namespace interpreter {
 
+class LoopBuilder;
+
 class BytecodeGenerator final : public AstVisitor {
  public:
   BytecodeGenerator(Isolate* isolate, Zone* zone);
@@ -23,52 +25,25 @@ class BytecodeGenerator final : public AstVisitor {
   AST_NODE_LIST(DECLARE_VISIT)
 #undef DECLARE_VISIT
 
-  // Visiting function for declarations list is overridden.
+  // Visiting function for declarations list and statements are overridden.
   void VisitDeclarations(ZoneList<Declaration*>* declarations) override;
+  void VisitStatements(ZoneList<Statement*>* statments) override;
 
  private:
   class ContextScope;
   class ControlScope;
+  class ControlScopeForBreakable;
   class ControlScopeForIteration;
-  class ControlScopeForSwitch;
+  class ControlScopeForTopLevel;
+  class ControlScopeForTryCatch;
+  class ControlScopeForTryFinally;
   class ExpressionResultScope;
   class EffectResultScope;
   class AccumulatorResultScope;
   class RegisterResultScope;
-  class AssignmentHazardScope;
-
-  // Helper class that aliases locals and parameters when assignment
-  // hazards occur in binary expressions. For y = x + (x = 1) has an
-  // assignment hazard because the lhs evaluates to the register
-  // holding x and the rhs (x = 1) potentially updates x. When this
-  // hazard is detected, the rhs uses a temporary to hold the newer
-  // value of x while preserving the lhs for the binary expresion
-  // evaluation. The newer value is spilled to x at the end of the
-  // binary expression evaluation.
-  class AssignmentHazardHelper final {
-   public:
-    explicit AssignmentHazardHelper(BytecodeGenerator* generator);
-    MUST_USE_RESULT Register GetRegisterForLoad(Register reg);
-    MUST_USE_RESULT Register GetRegisterForStore(Register reg);
-
-   private:
-    friend class AssignmentHazardScope;
-
-    void EnterScope();
-    void LeaveScope();
-    void RestoreAliasedLocalsAndParameters();
-
-    BytecodeGenerator* generator_;
-    ZoneMap<int, int> alias_mappings_;
-    ZoneSet<int> aliased_locals_and_parameters_;
-    ExpressionResultScope* execution_result_;
-    int scope_depth_;
-
-    DISALLOW_COPY_AND_ASSIGN(AssignmentHazardHelper);
-  };
+  class RegisterAllocationScope;
 
   void MakeBytecodeBody();
-  Register NextContextRegister() const;
 
   DEFINE_AST_VISITOR_SUBCLASS_MEMBERS();
 
@@ -104,11 +79,20 @@ class BytecodeGenerator final : public AstVisitor {
   void VisitVariableAssignment(Variable* variable, FeedbackVectorSlot slot);
 
   void VisitArgumentsObject(Variable* variable);
+  void VisitRestArgumentsArray(Variable* rest, int index);
+  void VisitClassLiteralContents(ClassLiteral* expr);
+  void VisitClassLiteralForRuntimeDefinition(ClassLiteral* expr);
+  void VisitClassLiteralProperties(ClassLiteral* expr, Register literal,
+                                   Register prototype);
+  void VisitClassLiteralStaticPrototypeWithComputedName(Register name);
   void VisitThisFunctionVariable(Variable* variable);
   void VisitNewTargetVariable(Variable* variable);
   void VisitNewLocalFunctionContext();
   void VisitBuildLocalActivationContext();
+  void VisitBlockDeclarationsAndStatements(Block* stmt);
   void VisitNewLocalBlockContext(Scope* scope);
+  void VisitNewLocalCatchContext(Variable* variable);
+  void VisitNewLocalWithContext();
   void VisitFunctionClosureForContext();
   void VisitSetHomeObject(Register value, Register home_object,
                           ObjectLiteralProperty* property, int slot_number = 0);
@@ -117,17 +101,25 @@ class BytecodeGenerator final : public AstVisitor {
                                   Register value_out);
   void VisitForInAssignment(Expression* expr, FeedbackVectorSlot slot);
 
+  // Visit the body of a loop iteration.
+  void VisitIterationBody(IterationStatement* stmt, LoopBuilder* loop_builder);
+
+  // Visit a statement and switch scopes, the context is in the accumulator.
+  void VisitInScope(Statement* stmt, Scope* scope);
+
   // Visitors for obtaining expression result in the accumulator, in a
   // register, or just getting the effect.
-  void VisitForAccumulatorValue(Expression* expression);
-  MUST_USE_RESULT Register VisitForRegisterValue(Expression* expression);
-  void VisitForEffect(Expression* node);
+  void VisitForAccumulatorValue(Expression* expr);
+  void VisitForAccumulatorValueOrTheHole(Expression* expr);
+  MUST_USE_RESULT Register VisitForRegisterValue(Expression* expr);
+  void VisitForEffect(Expression* expr);
 
   // Methods for tracking and remapping register.
   void RecordStoreToRegister(Register reg);
   Register LoadFromAliasedRegister(Register reg);
 
-  inline BytecodeArrayBuilder* builder() { return &builder_; }
+  inline void set_builder(BytecodeArrayBuilder* builder) { builder_ = builder; }
+  inline BytecodeArrayBuilder* builder() const { return builder_; }
 
   inline Isolate* isolate() const { return isolate_; }
   inline Zone* zone() const { return zone_; }
@@ -149,8 +141,12 @@ class BytecodeGenerator final : public AstVisitor {
     execution_result_ = execution_result;
   }
   ExpressionResultScope* execution_result() const { return execution_result_; }
-  inline AssignmentHazardHelper* assignment_hazard_helper() {
-    return &assignment_hazard_helper_;
+  inline void set_register_allocator(
+      RegisterAllocationScope* register_allocator) {
+    register_allocator_ = register_allocator;
+  }
+  RegisterAllocationScope* register_allocator() const {
+    return register_allocator_;
   }
 
   ZoneVector<Handle<Object>>* globals() { return &globals_; }
@@ -160,14 +156,14 @@ class BytecodeGenerator final : public AstVisitor {
 
   Isolate* isolate_;
   Zone* zone_;
-  BytecodeArrayBuilder builder_;
+  BytecodeArrayBuilder* builder_;
   CompilationInfo* info_;
   Scope* scope_;
   ZoneVector<Handle<Object>> globals_;
   ControlScope* execution_control_;
   ContextScope* execution_context_;
   ExpressionResultScope* execution_result_;
-  AssignmentHazardHelper assignment_hazard_helper_;
+  RegisterAllocationScope* register_allocator_;
 };
 
 }  // namespace interpreter

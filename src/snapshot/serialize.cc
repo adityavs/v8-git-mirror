@@ -82,6 +82,8 @@ ExternalReferenceTable::ExternalReferenceTable(Isolate* isolate) {
   Add(ExternalReference::address_of_one_half().address(),
       "LDoubleConstant::one_half");
   Add(ExternalReference::isolate_address(isolate).address(), "isolate");
+  Add(ExternalReference::interpreter_dispatch_table_address(isolate).address(),
+      "Interpreter::dispatch_table_address");
   Add(ExternalReference::address_of_negative_infinity().address(),
       "LDoubleConstant::negative_infinity");
   Add(ExternalReference::power_double_double_function(isolate).address(),
@@ -119,6 +121,22 @@ ExternalReferenceTable::ExternalReferenceTable(Isolate* isolate) {
       "InvokeFunctionCallback");
   Add(ExternalReference::invoke_accessor_getter_callback(isolate).address(),
       "InvokeAccessorGetterCallback");
+  Add(ExternalReference::f32_trunc_wrapper_function(isolate).address(),
+      "f32_trunc_wrapper");
+  Add(ExternalReference::f32_floor_wrapper_function(isolate).address(),
+      "f32_floor_wrapper");
+  Add(ExternalReference::f32_ceil_wrapper_function(isolate).address(),
+      "f32_ceil_wrapper");
+  Add(ExternalReference::f32_nearest_int_wrapper_function(isolate).address(),
+      "f32_nearest_int_wrapper");
+  Add(ExternalReference::f64_trunc_wrapper_function(isolate).address(),
+      "f64_trunc_wrapper");
+  Add(ExternalReference::f64_floor_wrapper_function(isolate).address(),
+      "f64_floor_wrapper");
+  Add(ExternalReference::f64_ceil_wrapper_function(isolate).address(),
+      "f64_ceil_wrapper");
+  Add(ExternalReference::f64_nearest_int_wrapper_function(isolate).address(),
+      "f64_nearest_int_wrapper");
   Add(ExternalReference::log_enter_external_function(isolate).address(),
       "Logger::EnterExternal");
   Add(ExternalReference::log_leave_external_function(isolate).address(),
@@ -268,8 +286,13 @@ ExternalReferenceTable::ExternalReferenceTable(Isolate* isolate) {
   static const AccessorRefTable accessors[] = {
 #define ACCESSOR_INFO_DECLARATION(name)                                     \
   { FUNCTION_ADDR(&Accessors::name##Getter), "Accessors::" #name "Getter" } \
-  , {FUNCTION_ADDR(&Accessors::name##Setter), "Accessors::" #name "Setter"},
+  ,
       ACCESSOR_INFO_LIST(ACCESSOR_INFO_DECLARATION)
+#undef ACCESSOR_INFO_DECLARATION
+#define ACCESSOR_SETTER_DECLARATION(name)                  \
+  { FUNCTION_ADDR(&Accessors::name), "Accessors::" #name } \
+  ,
+          ACCESSOR_SETTER_LIST(ACCESSOR_SETTER_DECLARATION)
 #undef ACCESSOR_INFO_DECLARATION
   };
 
@@ -299,6 +322,10 @@ ExternalReferenceTable::ExternalReferenceTable(Isolate* isolate) {
   Add(ExternalReference::incremental_marking_record_write_function(isolate)
           .address(),
       "IncrementalMarking::RecordWrite");
+  Add(ExternalReference::incremental_marking_record_write_code_entry_function(
+          isolate)
+          .address(),
+      "IncrementalMarking::RecordWriteOfCodeEntryFromCode");
   Add(ExternalReference::store_buffer_overflow_function(isolate).address(),
       "StoreBuffer::StoreBufferOverflow");
 
@@ -622,6 +649,10 @@ void Deserializer::VisitPointers(Object** start, Object** end) {
   ReadData(start, end, NEW_SPACE, NULL);
 }
 
+void Deserializer::Synchronize(VisitorSynchronization::SyncTag tag) {
+  static const byte expected = kSynchronize;
+  CHECK_EQ(expected, source_.Get());
+}
 
 void Deserializer::DeserializeDeferredObjects() {
   for (int code = source_.Get(); code != kSynchronize; code = source_.Get()) {
@@ -1567,7 +1598,7 @@ bool PartialSerializer::ShouldBeInThePartialSnapshotCache(HeapObject* o) {
   // would cause dupes.
   DCHECK(!o->IsScript());
   return o->IsName() || o->IsSharedFunctionInfo() || o->IsHeapNumber() ||
-         o->IsCode() || o->IsScopeInfo() || o->IsExecutableAccessorInfo() ||
+         o->IsCode() || o->IsScopeInfo() || o->IsAccessorInfo() ||
          o->map() ==
              startup_serializer_->isolate()->heap()->fixed_cow_array_map();
 }
@@ -1655,9 +1686,10 @@ bool Serializer::SerializeKnownObject(HeapObject* obj, HowToCode how_to_code,
   return false;
 }
 
-
 StartupSerializer::StartupSerializer(Isolate* isolate, SnapshotByteSink* sink)
-    : Serializer(isolate, sink), root_index_wave_front_(0) {
+    : Serializer(isolate, sink),
+      root_index_wave_front_(0),
+      serializing_builtins_(false) {
   // Clear the cache of objects used by the partial snapshot.  After the
   // strong roots have been serialized we can create a partial snapshot
   // which will repopulate the cache with objects needed by that partial
@@ -1671,6 +1703,19 @@ void StartupSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
                                         WhereToPoint where_to_point, int skip) {
   DCHECK(!obj->IsJSFunction());
 
+  if (obj->IsCode()) {
+    Code* code = Code::cast(obj);
+    // If the function code is compiled (either as native code or bytecode),
+    // replace it with lazy-compile builtin. Only exception is when we are
+    // serializing the canonical interpreter-entry-trampoline builtin.
+    if (code->kind() == Code::FUNCTION ||
+        (!serializing_builtins_ && code->is_interpreter_entry_trampoline())) {
+      obj = isolate()->builtins()->builtin(Builtins::kCompileLazy);
+    }
+  } else if (obj->IsBytecodeArray()) {
+    obj = isolate()->heap()->undefined_value();
+  }
+
   int root_index = root_index_map_.Lookup(obj);
   // We can only encode roots as such if it has already been serialized.
   // That applies to root indices below the wave front.
@@ -1678,10 +1723,6 @@ void StartupSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
       root_index < root_index_wave_front_) {
     PutRoot(root_index, obj, how_to_code, where_to_point, skip);
     return;
-  }
-
-  if (obj->IsCode() && Code::cast(obj)->kind() == Code::FUNCTION) {
-    obj = isolate()->builtins()->builtin(Builtins::kCompileLazy);
   }
 
   if (SerializeKnownObject(obj, how_to_code, where_to_point, skip)) return;
@@ -1708,6 +1749,12 @@ void StartupSerializer::SerializeWeakReferencesAndDeferred() {
   Pad();
 }
 
+void StartupSerializer::Synchronize(VisitorSynchronization::SyncTag tag) {
+  // We expect the builtins tag after builtins have been serialized.
+  DCHECK(!serializing_builtins_ || tag == VisitorSynchronization::kBuiltins);
+  serializing_builtins_ = (tag == VisitorSynchronization::kHandleScope);
+  sink_->Put(kSynchronize, "Synchronize");
+}
 
 void Serializer::PutRoot(int root_index,
                          HeapObject* object,
@@ -1796,7 +1843,7 @@ void PartialSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
   FlushSkip(skip);
 
   // Clear literal boilerplates.
-  if (obj->IsJSFunction() && !JSFunction::cast(obj)->shared()->bound()) {
+  if (obj->IsJSFunction()) {
     FixedArray* literals = JSFunction::cast(obj)->literals();
     for (int i = 0; i < literals->length(); i++) literals->set_undefined(i);
   }
@@ -1919,7 +1966,7 @@ class UnlinkWeakCellScope {
     if (object->IsWeakCell()) {
       weak_cell_ = WeakCell::cast(object);
       next_ = weak_cell_->next();
-      weak_cell_->clear_next(object->GetHeap());
+      weak_cell_->clear_next(object->GetHeap()->the_hole_value());
     }
   }
 

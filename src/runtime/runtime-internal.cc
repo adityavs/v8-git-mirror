@@ -92,7 +92,7 @@ RUNTIME_FUNCTION(Runtime_ReThrow) {
 
 RUNTIME_FUNCTION(Runtime_ThrowStackOverflow) {
   SealHandleScope shs(isolate);
-  DCHECK_EQ(0, args.length());
+  DCHECK_LE(0, args.length());
   return isolate->StackOverflow();
 }
 
@@ -176,6 +176,16 @@ RUNTIME_FUNCTION(Runtime_ThrowStrongModeImplicitConversion) {
   DCHECK(args.length() == 0);
   THROW_NEW_ERROR_RETURN_FAILURE(
       isolate, NewTypeError(MessageTemplate::kStrongImplicitConversion));
+}
+
+
+RUNTIME_FUNCTION(Runtime_ThrowApplyNonFunction) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(Object, object, 0);
+  Handle<String> type = Object::TypeOf(isolate, object);
+  THROW_NEW_ERROR_RETURN_FAILURE(
+      isolate, NewTypeError(MessageTemplate::kApplyNonFunction, object, type));
 }
 
 
@@ -292,18 +302,6 @@ RUNTIME_FUNCTION(Runtime_MessageGetScript) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_ErrorToStringRT) {
-  HandleScope scope(isolate);
-  DCHECK(args.length() == 1);
-  CONVERT_ARG_HANDLE_CHECKED(JSObject, error, 0);
-  Handle<String> result;
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-      isolate, result,
-      isolate->error_tostring_helper()->Stringify(isolate, error));
-  return *result;
-}
-
-
 RUNTIME_FUNCTION(Runtime_FormatMessageString) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 4);
@@ -337,8 +335,8 @@ static inline Object* ReturnDereferencedHandle(Handle<Object> obj,
 }
 
 
-static inline Object* ReturnPositiveSmiOrNull(int value, Isolate* isolate) {
-  if (value >= 0) return Smi::FromInt(value);
+static inline Object* ReturnPositiveNumberOrNull(int value, Isolate* isolate) {
+  if (value >= 0) return *isolate->factory()->NewNumberFromInt(value);
   return isolate->heap()->null_value();
 }
 
@@ -352,8 +350,8 @@ CALLSITE_GET(GetFileName, ReturnDereferencedHandle)
 CALLSITE_GET(GetFunctionName, ReturnDereferencedHandle)
 CALLSITE_GET(GetScriptNameOrSourceUrl, ReturnDereferencedHandle)
 CALLSITE_GET(GetMethodName, ReturnDereferencedHandle)
-CALLSITE_GET(GetLineNumber, ReturnPositiveSmiOrNull)
-CALLSITE_GET(GetColumnNumber, ReturnPositiveSmiOrNull)
+CALLSITE_GET(GetLineNumber, ReturnPositiveNumberOrNull)
+CALLSITE_GET(GetColumnNumber, ReturnPositiveNumberOrNull)
 CALLSITE_GET(IsNative, ReturnBoolean)
 CALLSITE_GET(IsToplevel, ReturnBoolean)
 CALLSITE_GET(IsEval, ReturnBoolean)
@@ -380,12 +378,6 @@ RUNTIME_FUNCTION(Runtime_IncrementStatsCounter) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_HarmonyToString) {
-  // TODO(caitp): Delete this runtime method when removing --harmony-tostring
-  return isolate->heap()->ToBoolean(FLAG_harmony_tostring);
-}
-
-
 namespace {
 
 bool ComputeLocation(Isolate* isolate, MessageLocation* target) {
@@ -403,7 +395,7 @@ bool ComputeLocation(Isolate* isolate, MessageLocation* target) {
       List<FrameSummary> frames(FLAG_max_inlining_levels + 1);
       it.frame()->Summarize(&frames);
       FrameSummary& summary = frames.last();
-      int pos = summary.code()->SourcePosition(summary.pc());
+      int pos = summary.abstract_code()->SourcePosition(summary.code_offset());
       *target = MessageLocation(casted_script, pos, pos + 1, handle(fun));
       return true;
     }
@@ -453,6 +445,48 @@ RUNTIME_FUNCTION(Runtime_ThrowConstructedNonConstructable) {
   Handle<String> callsite = RenderCallSite(isolate, object);
   THROW_NEW_ERROR_RETURN_FAILURE(
       isolate, NewTypeError(MessageTemplate::kNotConstructor, callsite));
+}
+
+
+RUNTIME_FUNCTION(Runtime_ThrowDerivedConstructorReturnedNonObject) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(0, args.length());
+  THROW_NEW_ERROR_RETURN_FAILURE(
+      isolate, NewTypeError(MessageTemplate::kDerivedConstructorReturn));
+}
+
+
+// ES6 section 7.3.17 CreateListFromArrayLike (obj)
+RUNTIME_FUNCTION(Runtime_CreateListFromArrayLike) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(Object, object, 0);
+  Handle<FixedArray> result;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, result,
+      Object::CreateListFromArrayLike(isolate, object, ElementTypes::kAll));
+  return *result;
+}
+
+
+RUNTIME_FUNCTION(Runtime_IncrementUseCounter) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  CONVERT_SMI_ARG_CHECKED(counter, 0);
+  isolate->CountUsage(static_cast<v8::Isolate::UseCounterFeature>(counter));
+  return isolate->heap()->undefined_value();
+}
+
+
+RUNTIME_FUNCTION(Runtime_GetAndResetRuntimeCallStats) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(0, args.length());
+  std::stringstream stats_stream;
+  isolate->runtime_state()->runtime_call_stats()->Print(stats_stream);
+  Handle<String> result =
+      isolate->factory()->NewStringFromAsciiChecked(stats_stream.str().c_str());
+  isolate->runtime_state()->runtime_call_stats()->Reset();
+  return *result;
 }
 
 }  // namespace internal

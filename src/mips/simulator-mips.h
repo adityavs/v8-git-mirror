@@ -300,6 +300,24 @@ class Simulator {
   inline int32_t SetDoubleHIW(double* addr);
   inline int32_t SetDoubleLOW(double* addr);
 
+  // Min/Max template functions for Double and Single arguments.
+  enum class IsMin : int { kMin = 0, kMax = 1 };
+
+  template <typename T>
+  bool FPUProcessNaNsAndZeros(T a, T b, IsMin min, T& result);
+
+  template <typename T>
+  T FPUMin(T a, T b);
+
+  template <typename T>
+  T FPUMax(T a, T b);
+
+  template <typename T>
+  T FPUMinA(T a, T b);
+
+  template <typename T>
+  T FPUMaxA(T a, T b);
+
   // Executing is handled based on the instruction type.
   void DecodeTypeRegister(Instruction* instr);
 
@@ -344,6 +362,7 @@ class Simulator {
   inline int32_t ft_reg() const { return currentInstr_->FtValue(); }
   inline int32_t fd_reg() const { return currentInstr_->FdValue(); }
   inline int32_t sa() const { return currentInstr_->SaValue(); }
+  inline int32_t lsa_sa() const { return currentInstr_->LsaSaValue(); }
 
   inline void SetResult(int32_t rd_reg, int32_t alu_out) {
     set_register(rd_reg, alu_out);
@@ -358,13 +377,13 @@ class Simulator {
 
   // Compact branch guard.
   void CheckForbiddenSlot(int32_t current_pc) {
-    Instruction* instr_aftter_compact_branch =
+    Instruction* instr_after_compact_branch =
         reinterpret_cast<Instruction*>(current_pc + Instruction::kInstrSize);
-    if (instr_aftter_compact_branch->IsForbiddenInBranchDelay()) {
+    if (instr_after_compact_branch->IsForbiddenAfterBranch()) {
       V8_Fatal(__FILE__, __LINE__,
                "Error: Unexpected instruction 0x%08x immediately after a "
                "compact branch instruction.",
-               *reinterpret_cast<uint32_t*>(instr_aftter_compact_branch));
+               *reinterpret_cast<uint32_t*>(instr_after_compact_branch));
     }
   }
 

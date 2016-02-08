@@ -153,9 +153,12 @@ class CallDescriptor final : public ZoneObject {
     kHasLocalCatchHandler = 1u << 4,
     kSupportsTailCalls = 1u << 5,
     kCanUseRoots = 1u << 6,
-    // Indicates that the native stack should be used for a code object. This
-    // information is important for native calls on arm64.
+    // (arm64 only) native stack should be used for arguments.
     kUseNativeStack = 1u << 7,
+    // (arm64 only) call instruction has to restore JSSP.
+    kRestoreJSSP = 1u << 8,
+    // Causes the code generator to initialize the root register.
+    kInitializeRootRegister = 1u << 9,
     kPatchableCallSiteWithNop = kPatchableCallSite | kNeedsNopAfterCall
   };
   typedef base::Flags<Flag> Flags;
@@ -222,6 +225,9 @@ class CallDescriptor final : public ZoneObject {
   bool NeedsFrameState() const { return flags() & kNeedsFrameState; }
   bool SupportsTailCalls() const { return flags() & kSupportsTailCalls; }
   bool UseNativeStack() const { return flags() & kUseNativeStack; }
+  bool InitializeRootRegister() const {
+    return flags() & kInitializeRootRegister;
+  }
 
   LinkageLocation GetReturnLocation(size_t index) const {
     return location_sig_->GetReturn(index);
@@ -319,14 +325,16 @@ class Linkage : public ZoneObject {
       Isolate* isolate, Zone* zone, const CallInterfaceDescriptor& descriptor,
       int stack_parameter_count, CallDescriptor::Flags flags,
       Operator::Properties properties = Operator::kNoProperties,
-      MachineType return_type = kMachAnyTagged);
+      MachineType return_type = MachineType::AnyTagged(),
+      size_t return_count = 1);
 
   // Creates a call descriptor for simplified C calls that is appropriate
   // for the host platform. This simplified calling convention only supports
   // integers and pointers of one word size each, i.e. no floating point,
   // structs, pointers to members, etc.
-  static CallDescriptor* GetSimplifiedCDescriptor(Zone* zone,
-                                                  const MachineSignature* sig);
+  static CallDescriptor* GetSimplifiedCDescriptor(
+      Zone* zone, const MachineSignature* sig,
+      bool set_initialize_root_flag = false);
 
   // Creates a call descriptor for interpreter handler code stubs. These are not
   // intended to be called directly but are instead dispatched to by the

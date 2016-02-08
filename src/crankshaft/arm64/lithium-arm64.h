@@ -64,7 +64,6 @@ class LCodeGen;
   V(ConstantT)                               \
   V(ConstructDouble)                         \
   V(Context)                                 \
-  V(DateField)                               \
   V(DebugBreak)                              \
   V(DeclareGlobals)                          \
   V(Deoptimize)                              \
@@ -107,7 +106,6 @@ class LCodeGen;
   V(LoadNamedField)                          \
   V(LoadNamedGeneric)                        \
   V(LoadRoot)                                \
-  V(MapEnumLength)                           \
   V(MathAbs)                                 \
   V(MathAbsTagged)                           \
   V(MathClz32)                               \
@@ -1243,23 +1241,6 @@ class LContext final : public LTemplateInstruction<1, 0, 0> {
 };
 
 
-class LDateField final : public LTemplateInstruction<1, 1, 0> {
- public:
-  LDateField(LOperand* date, Smi* index) : index_(index) {
-    inputs_[0] = date;
-  }
-
-  LOperand* date() { return inputs_[0]; }
-  Smi* index() const { return index_; }
-
-  DECLARE_CONCRETE_INSTRUCTION(DateField, "date-field")
-  DECLARE_HYDROGEN_ACCESSOR(DateField)
-
- private:
-  Smi* index_;
-};
-
-
 class LDebugBreak final : public LTemplateInstruction<0, 0, 0> {
  public:
   DECLARE_CONCRETE_INSTRUCTION(DebugBreak, "break")
@@ -1806,18 +1787,6 @@ class LLoadRoot final : public LTemplateInstruction<1, 0, 0> {
   DECLARE_HYDROGEN_ACCESSOR(LoadRoot)
 
   Heap::RootListIndex index() const { return hydrogen()->index(); }
-};
-
-
-class LMapEnumLength final : public LTemplateInstruction<1, 1, 0> {
- public:
-  explicit LMapEnumLength(LOperand* value) {
-    inputs_[0] = value;
-  }
-
-  LOperand* value() { return inputs_[0]; }
-
-  DECLARE_CONCRETE_INSTRUCTION(MapEnumLength, "map-enum-length")
 };
 
 

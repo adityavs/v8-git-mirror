@@ -301,7 +301,7 @@ void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm,
   GenerateFastArrayLoad(masm, receiver, key, rax, rbx, rax, &slow,
                         language_mode);
   Counters* counters = masm->isolate()->counters();
-  __ IncrementCounter(counters->keyed_load_generic_smi(), 1);
+  __ IncrementCounter(counters->ic_keyed_load_generic_smi(), 1);
   __ ret(0);
 
   __ bind(&check_number_dictionary);
@@ -319,7 +319,7 @@ void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm,
 
   __ bind(&slow);
   // Slow case: Jump to runtime.
-  __ IncrementCounter(counters->keyed_load_generic_slow(), 1);
+  __ IncrementCounter(counters->ic_keyed_load_generic_slow(), 1);
   KeyedLoadIC::GenerateRuntimeGetProperty(masm, language_mode);
 
   __ bind(&check_name);
@@ -366,7 +366,7 @@ void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm,
   GenerateGlobalInstanceTypeCheck(masm, rax, &slow);
 
   GenerateDictionaryLoad(masm, &slow, rbx, key, rax, rdi, rax);
-  __ IncrementCounter(counters->keyed_load_generic_symbol(), 1);
+  __ IncrementCounter(counters->ic_keyed_load_generic_symbol(), 1);
   __ ret(0);
 
   __ bind(&index_name);
@@ -667,13 +667,12 @@ void LoadIC::GenerateMiss(MacroAssembler* masm) {
   // The return address is on the stack.
 
   Counters* counters = masm->isolate()->counters();
-  __ IncrementCounter(counters->load_miss(), 1);
+  __ IncrementCounter(counters->ic_load_miss(), 1);
 
   LoadIC_PushArgs(masm);
 
   // Perform tail call to the entry.
-  int arg_count = 4;
-  __ TailCallRuntime(Runtime::kLoadIC_Miss, arg_count, 1);
+  __ TailCallRuntime(Runtime::kLoadIC_Miss);
 }
 
 
@@ -692,21 +691,19 @@ void LoadIC::GenerateRuntimeGetProperty(MacroAssembler* masm,
 
   // Do tail-call to runtime routine.
   __ TailCallRuntime(is_strong(language_mode) ? Runtime::kGetPropertyStrong
-                                              : Runtime::kGetProperty,
-                     2, 1);
+                                              : Runtime::kGetProperty);
 }
 
 
 void KeyedLoadIC::GenerateMiss(MacroAssembler* masm) {
   // The return address is on the stack.
   Counters* counters = masm->isolate()->counters();
-  __ IncrementCounter(counters->keyed_load_miss(), 1);
+  __ IncrementCounter(counters->ic_keyed_load_miss(), 1);
 
   LoadIC_PushArgs(masm);
 
   // Perform tail call to the entry.
-  int arg_count = 4;
-  __ TailCallRuntime(Runtime::kKeyedLoadIC_Miss, arg_count, 1);
+  __ TailCallRuntime(Runtime::kKeyedLoadIC_Miss);
 }
 
 
@@ -725,8 +722,7 @@ void KeyedLoadIC::GenerateRuntimeGetProperty(MacroAssembler* masm,
 
   // Do tail-call to runtime routine.
   __ TailCallRuntime(is_strong(language_mode) ? Runtime::kKeyedGetPropertyStrong
-                                              : Runtime::kKeyedGetProperty,
-                     2, 1);
+                                              : Runtime::kKeyedGetProperty);
 }
 
 
@@ -761,7 +757,7 @@ void StoreIC::GenerateMiss(MacroAssembler* masm) {
   StoreIC_PushArgs(masm);
 
   // Perform tail call to the entry.
-  __ TailCallRuntime(Runtime::kStoreIC_Miss, 5, 1);
+  __ TailCallRuntime(Runtime::kStoreIC_Miss);
 }
 
 
@@ -778,11 +774,11 @@ void StoreIC::GenerateNormal(MacroAssembler* masm) {
   __ movp(dictionary, FieldOperand(receiver, JSObject::kPropertiesOffset));
   GenerateDictionaryStore(masm, &miss, dictionary, name, value, r8, r9);
   Counters* counters = masm->isolate()->counters();
-  __ IncrementCounter(counters->store_normal_hit(), 1);
+  __ IncrementCounter(counters->ic_store_normal_hit(), 1);
   __ ret(0);
 
   __ bind(&miss);
-  __ IncrementCounter(counters->store_normal_miss(), 1);
+  __ IncrementCounter(counters->ic_store_normal_miss(), 1);
   GenerateMiss(masm);
 }
 
@@ -792,7 +788,7 @@ void KeyedStoreIC::GenerateMiss(MacroAssembler* masm) {
   StoreIC_PushArgs(masm);
 
   // Do tail-call to runtime routine.
-  __ TailCallRuntime(Runtime::kKeyedStoreIC_Miss, 5, 1);
+  __ TailCallRuntime(Runtime::kKeyedStoreIC_Miss);
 }
 
 

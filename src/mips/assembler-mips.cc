@@ -285,10 +285,7 @@ Assembler::Assembler(Isolate* isolate, void* buffer, int buffer_size)
 
 
 void Assembler::GetCode(CodeDesc* desc) {
-  if (IsPrevInstrCompactBranch()) {
-    nop();
-    ClearCompactBranchState();
-  }
+  EmitForbiddenSlotInstruction();
   DCHECK(pc_ <= reloc_info_writer.pos());  // No overlap.
   // Set up code descriptor.
   desc->buffer = buffer_;
@@ -302,10 +299,7 @@ void Assembler::GetCode(CodeDesc* desc) {
 
 void Assembler::Align(int m) {
   DCHECK(m >= 4 && base::bits::IsPowerOfTwo32(m));
-  if (IsPrevInstrCompactBranch()) {
-    nop();
-    ClearCompactBranchState();
-  }
+  EmitForbiddenSlotInstruction();
   while ((pc_offset() & (m - 1)) != 0) {
     nop();
   }
@@ -1700,10 +1694,20 @@ void Assembler::rotr(Register rd, Register rt, uint16_t sa) {
 
 void Assembler::rotrv(Register rd, Register rt, Register rs) {
   // Should be called via MacroAssembler::Ror.
-  DCHECK(rd.is_valid() && rt.is_valid() && rs.is_valid() );
+  DCHECK(rd.is_valid() && rt.is_valid() && rs.is_valid());
   DCHECK(IsMipsArchVariant(kMips32r2) || IsMipsArchVariant(kMips32r6));
   Instr instr = SPECIAL | (rs.code() << kRsShift) | (rt.code() << kRtShift)
      | (rd.code() << kRdShift) | (1 << kSaShift) | SRLV;
+  emit(instr);
+}
+
+
+void Assembler::lsa(Register rd, Register rt, Register rs, uint8_t sa) {
+  DCHECK(rd.is_valid() && rt.is_valid() && rs.is_valid());
+  DCHECK(sa < 5 && sa > 0);
+  DCHECK(IsMipsArchVariant(kMips32r6));
+  Instr instr = SPECIAL | (rs.code() << kRsShift) | (rt.code() << kRtShift) |
+                (rd.code() << kRdShift) | (sa - 1) << kSaShift | LSA;
   emit(instr);
 }
 
@@ -2855,46 +2859,34 @@ void Assembler::GrowBuffer() {
 
 
 void Assembler::db(uint8_t data) {
-  CheckBuffer();
-  *reinterpret_cast<uint8_t*>(pc_) = data;
-  pc_ += sizeof(uint8_t);
+  CheckForEmitInForbiddenSlot();
+  EmitHelper(data);
 }
 
 
 void Assembler::dd(uint32_t data) {
-  CheckBuffer();
-  *reinterpret_cast<uint32_t*>(pc_) = data;
-  pc_ += sizeof(uint32_t);
+  CheckForEmitInForbiddenSlot();
+  EmitHelper(data);
 }
 
 
 void Assembler::dq(uint64_t data) {
-  CheckBuffer();
-  *reinterpret_cast<uint64_t*>(pc_) = data;
-  pc_ += sizeof(uint64_t);
+  CheckForEmitInForbiddenSlot();
+  EmitHelper(data);
 }
 
 
 void Assembler::dd(Label* label) {
-  CheckBuffer();
-  RecordRelocInfo(RelocInfo::INTERNAL_REFERENCE);
   uint32_t data;
+  CheckForEmitInForbiddenSlot();
   if (label->is_bound()) {
     data = reinterpret_cast<uint32_t>(buffer_ + label->pos());
   } else {
     data = jump_address(label);
     internal_reference_positions_.insert(label->pos());
   }
-  *reinterpret_cast<uint32_t*>(pc_) = data;
-  pc_ += sizeof(uint32_t);
-}
-
-
-void Assembler::emit_code_stub_address(Code* stub) {
-  CheckBuffer();
-  *reinterpret_cast<uint32_t*>(pc_) =
-      reinterpret_cast<uint32_t>(stub->instruction_start());
-  pc_ += sizeof(uint32_t);
+  RecordRelocInfo(RelocInfo::INTERNAL_REFERENCE);
+  EmitHelper(data);
 }
 
 

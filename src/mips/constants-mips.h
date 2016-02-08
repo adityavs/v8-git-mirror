@@ -261,6 +261,7 @@ const int kRdShift       = 11;
 const int kRdBits        = 5;
 const int kSaShift       = 6;
 const int kSaBits        = 5;
+const int kLsaSaBits = 2;
 const int kFunctionShift = 0;
 const int kFunctionBits  = 6;
 const int kLuiShift      = 16;
@@ -389,7 +390,7 @@ enum Opcode : uint32_t {
   POP10 = ADDI,   // beqzalc, bovc, beqc
   POP26 = BLEZL,  // bgezc, blezc, bgec/blec
   POP27 = BGTZL,  // bgtzc, bltzc, bltc/bgtc
-  POP30 = DADDI,  // bnezalc, bvnc, bnec
+  POP30 = DADDI,  // bnezalc, bnvc, bnec
 };
 
 enum SecondaryField : uint32_t {
@@ -399,6 +400,7 @@ enum SecondaryField : uint32_t {
   SRL = ((0U << 3) + 2),
   SRA = ((0U << 3) + 3),
   SLLV = ((0U << 3) + 4),
+  LSA = ((0U << 3) + 5),
   SRLV = ((0U << 3) + 6),
   SRAV = ((0U << 3) + 7),
 
@@ -777,7 +779,12 @@ enum FPURoundingMode {
   kRoundToNearest = RN,
   kRoundToZero = RZ,
   kRoundToPlusInf = RP,
-  kRoundToMinusInf = RM
+  kRoundToMinusInf = RM,
+
+  mode_round = RN,
+  mode_ceil = RP,
+  mode_floor = RM,
+  mode_trunc = RZ
 };
 
 const uint32_t kFPURoundingModeMask = 3 << 0;
@@ -906,20 +913,21 @@ class Instruction {
       FunctionFieldToBitNumber(BREAK) | FunctionFieldToBitNumber(SLL) |
       FunctionFieldToBitNumber(SRL) | FunctionFieldToBitNumber(SRA) |
       FunctionFieldToBitNumber(SLLV) | FunctionFieldToBitNumber(SRLV) |
-      FunctionFieldToBitNumber(SRAV) | FunctionFieldToBitNumber(MFHI) |
-      FunctionFieldToBitNumber(MFLO) | FunctionFieldToBitNumber(MULT) |
-      FunctionFieldToBitNumber(MULTU) | FunctionFieldToBitNumber(DIV) |
-      FunctionFieldToBitNumber(DIVU) | FunctionFieldToBitNumber(ADD) |
-      FunctionFieldToBitNumber(ADDU) | FunctionFieldToBitNumber(SUB) |
-      FunctionFieldToBitNumber(SUBU) | FunctionFieldToBitNumber(AND) |
-      FunctionFieldToBitNumber(OR) | FunctionFieldToBitNumber(XOR) |
-      FunctionFieldToBitNumber(NOR) | FunctionFieldToBitNumber(SLT) |
-      FunctionFieldToBitNumber(SLTU) | FunctionFieldToBitNumber(TGE) |
-      FunctionFieldToBitNumber(TGEU) | FunctionFieldToBitNumber(TLT) |
-      FunctionFieldToBitNumber(TLTU) | FunctionFieldToBitNumber(TEQ) |
-      FunctionFieldToBitNumber(TNE) | FunctionFieldToBitNumber(MOVZ) |
-      FunctionFieldToBitNumber(MOVN) | FunctionFieldToBitNumber(MOVCI) |
-      FunctionFieldToBitNumber(SELEQZ_S) | FunctionFieldToBitNumber(SELNEZ_S);
+      FunctionFieldToBitNumber(SRAV) | FunctionFieldToBitNumber(LSA) |
+      FunctionFieldToBitNumber(MFHI) | FunctionFieldToBitNumber(MFLO) |
+      FunctionFieldToBitNumber(MULT) | FunctionFieldToBitNumber(MULTU) |
+      FunctionFieldToBitNumber(DIV) | FunctionFieldToBitNumber(DIVU) |
+      FunctionFieldToBitNumber(ADD) | FunctionFieldToBitNumber(ADDU) |
+      FunctionFieldToBitNumber(SUB) | FunctionFieldToBitNumber(SUBU) |
+      FunctionFieldToBitNumber(AND) | FunctionFieldToBitNumber(OR) |
+      FunctionFieldToBitNumber(XOR) | FunctionFieldToBitNumber(NOR) |
+      FunctionFieldToBitNumber(SLT) | FunctionFieldToBitNumber(SLTU) |
+      FunctionFieldToBitNumber(TGE) | FunctionFieldToBitNumber(TGEU) |
+      FunctionFieldToBitNumber(TLT) | FunctionFieldToBitNumber(TLTU) |
+      FunctionFieldToBitNumber(TEQ) | FunctionFieldToBitNumber(TNE) |
+      FunctionFieldToBitNumber(MOVZ) | FunctionFieldToBitNumber(MOVN) |
+      FunctionFieldToBitNumber(MOVCI) | FunctionFieldToBitNumber(SELEQZ_S) |
+      FunctionFieldToBitNumber(SELNEZ_S);
 
 
   // Get the encoding type of the instruction.
@@ -951,6 +959,11 @@ class Instruction {
   inline int SaValue() const {
     DCHECK(InstructionType() == kRegisterType);
     return Bits(kSaShift + kSaBits - 1, kSaShift);
+  }
+
+  inline int LsaSaValue() const {
+    DCHECK(InstructionType() == kRegisterType);
+    return Bits(kSaShift + kLsaSaBits - 1, kSaShift);
   }
 
   inline int FunctionValue() const {

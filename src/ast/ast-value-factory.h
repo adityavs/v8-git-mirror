@@ -62,7 +62,7 @@ class AstString : public ZoneObject {
 };
 
 
-class AstRawString : public AstString {
+class AstRawString final : public AstString {
  public:
   int length() const override {
     if (is_one_byte_)
@@ -115,19 +115,17 @@ class AstRawString : public AstString {
 };
 
 
-class AstConsString : public AstString {
+class AstConsString final : public AstString {
  public:
   AstConsString(const AstString* left, const AstString* right)
-      : left_(left),
-        right_(right) {}
+      : length_(left->length() + right->length()), left_(left), right_(right) {}
 
-  int length() const override { return left_->length() + right_->length(); }
+  int length() const override { return length_; }
 
   void Internalize(Isolate* isolate) override;
 
  private:
-  friend class AstValueFactory;
-
+  const int length_;
   const AstString* left_;
   const AstString* right_;
 };
@@ -257,14 +255,19 @@ class AstValue : public ZoneObject {
   F(dot_catch, ".catch")                        \
   F(empty, "")                                  \
   F(eval, "eval")                               \
+  F(get_space, "get ")                          \
   F(let, "let")                                 \
   F(native, "native")                           \
   F(new_target, ".new.target")                  \
   F(next, "next")                               \
   F(proto, "__proto__")                         \
   F(prototype, "prototype")                     \
+  F(rest_parameter, ".rest_parameter")          \
+  F(return, "return")                           \
+  F(set_space, "set ")                          \
   F(this, "this")                               \
   F(this_function, ".this_function")            \
+  F(throw, "throw")                             \
   F(undefined, "undefined")                     \
   F(use_asm, "use asm")                         \
   F(use_strong, "use strong")                   \

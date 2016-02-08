@@ -205,6 +205,7 @@ void Scope::SetDefaults(ScopeType scope_type, Scope* outer_scope,
   arity_ = 0;
   has_simple_parameters_ = true;
   rest_parameter_ = NULL;
+  rest_index_ = -1;
   scope_info_ = scope_info;
   start_position_ = RelocInfo::kNoPosition;
   end_position_ = RelocInfo::kNoPosition;
@@ -521,6 +522,7 @@ Variable* Scope::DeclareParameter(
   if (is_rest) {
     DCHECK_NULL(rest_parameter_);
     rest_parameter_ = var;
+    rest_index_ = num_parameters();
   }
   params_.Add(var, zone());
   return var;
@@ -573,8 +575,21 @@ Variable* Scope::NewTemporary(const AstRawString* name) {
                                        TEMPORARY,
                                        Variable::NORMAL,
                                        kCreatedInitialized);
-  scope->temps_.Add(var, zone());
+  scope->AddTemporary(var);
   return var;
+}
+
+
+bool Scope::RemoveTemporary(Variable* var) {
+  // Most likely (always?) any temporary variable we want to remove
+  // was just added before, so we search backwards.
+  for (int i = temps_.length(); i-- > 0;) {
+    if (temps_[i] == var) {
+      temps_.Remove(i);
+      return true;
+    }
+  }
+  return false;
 }
 
 
@@ -838,6 +853,24 @@ void Scope::GetNestedScopeChain(Isolate* isolate,
       scope->GetNestedScopeChain(isolate, chain, position);
       return;
     }
+  }
+}
+
+
+void Scope::CollectNonLocals(HashMap* non_locals) {
+  // Collect non-local variables referenced in the scope.
+  // TODO(yangguo): store non-local variables explicitly if we can no longer
+  //                rely on unresolved_ to find them.
+  for (int i = 0; i < unresolved_.length(); i++) {
+    VariableProxy* proxy = unresolved_[i];
+    if (proxy->is_resolved() && proxy->var()->IsStackAllocated()) continue;
+    Handle<String> name = proxy->name();
+    void* key = reinterpret_cast<void*>(name.location());
+    HashMap::Entry* entry = non_locals->LookupOrInsert(key, name->Hash());
+    entry->value = key;
+  }
+  for (int i = 0; i < inner_scopes_.length(); i++) {
+    inner_scopes_[i]->CollectNonLocals(non_locals);
   }
 }
 
@@ -1154,7 +1187,13 @@ bool Scope::ResolveVariable(ParseInfo* info, VariableProxy* proxy,
     //  - Variables must not be allocated to the global scope.
     CHECK_NOT_NULL(outer_scope());
     //  - Variables must be bound locally or unallocated.
-    CHECK_EQ(BOUND, binding_kind);
+    if (BOUND != binding_kind) {
+      // The following variable name may be minified. If so, disable
+      // minification in js2c.py for better output.
+      Handle<String> name = proxy->raw_name()->string();
+      V8_Fatal(__FILE__, __LINE__, "Unbound variable: '%s' in native script.",
+               name->ToCString().get());
+    }
     VariableLocation location = var->location();
     CHECK(location == VariableLocation::LOCAL ||
           location == VariableLocation::CONTEXT ||

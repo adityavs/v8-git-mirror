@@ -28,6 +28,8 @@ namespace compiler {
   V(MipsNor)                       \
   V(MipsXor)                       \
   V(MipsClz)                       \
+  V(MipsCtz)                       \
+  V(MipsPopcnt)                    \
   V(MipsShl)                       \
   V(MipsShr)                       \
   V(MipsSar)                       \
@@ -71,9 +73,14 @@ namespace compiler {
   V(MipsRoundWD)                   \
   V(MipsFloorWD)                   \
   V(MipsCeilWD)                    \
+  V(MipsTruncWS)                   \
+  V(MipsRoundWS)                   \
+  V(MipsFloorWS)                   \
+  V(MipsCeilWS)                    \
   V(MipsTruncUwD)                  \
   V(MipsCvtDW)                     \
   V(MipsCvtDUw)                    \
+  V(MipsCvtSW)                     \
   V(MipsLb)                        \
   V(MipsLbu)                       \
   V(MipsSb)                        \

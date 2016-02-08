@@ -2,9 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(jochen): Remove this after the setting is turned on globally.
-#define V8_IMMINENT_DEPRECATION_WARNINGS
-
 #include <stdlib.h>
 
 #include "src/v8.h"
@@ -346,7 +343,6 @@ TEST(VisitThrow) {
   v8::V8::Initialize();
   HandleAndZoneScope handles;
   ZoneVector<ExpressionTypeEntry> types(handles.main_zone());
-  // Check that traversing an empty for statement works.
   const char test_function[] =
       "function foo() {\n"
       "  throw 123;\n"
@@ -367,7 +363,6 @@ TEST(VisitYield) {
   v8::V8::Initialize();
   HandleAndZoneScope handles;
   ZoneVector<ExpressionTypeEntry> types(handles.main_zone());
-  // Check that traversing an empty for statement works.
   const char test_function[] =
       "function* foo() {\n"
       "  yield 123;\n"
@@ -375,7 +370,7 @@ TEST(VisitYield) {
   CollectTypes(&handles, test_function, &types);
   CHECK_TYPES_BEGIN {
     CHECK_EXPR(FunctionLiteral, Bounds::Unbounded()) {
-      // Generator function yields generator on entry.
+      // Implicit initial yield
       CHECK_EXPR(Yield, Bounds::Unbounded()) {
         CHECK_VAR(.generator_object, Bounds::Unbounded());
         CHECK_EXPR(Assignment, Bounds::Unbounded()) {
@@ -383,15 +378,19 @@ TEST(VisitYield) {
           CHECK_EXPR(CallRuntime, Bounds::Unbounded());
         }
       }
-      // Then yields undefined.
+      // Explicit yield
       CHECK_EXPR(Yield, Bounds::Unbounded()) {
         CHECK_VAR(.generator_object, Bounds::Unbounded());
         CHECK_EXPR(Literal, Bounds::Unbounded());
       }
-      // Then yields 123.
+      // Implicit final yield
       CHECK_EXPR(Yield, Bounds::Unbounded()) {
         CHECK_VAR(.generator_object, Bounds::Unbounded());
         CHECK_EXPR(Literal, Bounds::Unbounded());
+      }
+      // Implicit finally clause
+      CHECK_EXPR(CallRuntime, Bounds::Unbounded()) {
+        CHECK_VAR(.generator_object, Bounds::Unbounded());
       }
     }
   }
@@ -403,7 +402,6 @@ TEST(VisitSkipping) {
   v8::V8::Initialize();
   HandleAndZoneScope handles;
   ZoneVector<ExpressionTypeEntry> types(handles.main_zone());
-  // Check that traversing an empty for statement works.
   const char test_function[] =
       "function foo(x) {\n"
       "  return (x + x) + 1;\n"

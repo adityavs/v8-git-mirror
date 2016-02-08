@@ -44,6 +44,7 @@ namespace internal {
   V(MathPow)                                \
   V(ProfileEntryHook)                       \
   V(RecordWrite)                            \
+  V(RestParamAccess)                        \
   V(RegExpExec)                             \
   V(StoreBufferOverflow)                    \
   V(StoreElement)                           \
@@ -53,6 +54,7 @@ namespace internal {
   V(ToNumber)                               \
   V(ToLength)                               \
   V(ToString)                               \
+  V(ToName)                                 \
   V(ToObject)                               \
   V(VectorStoreICTrampoline)                \
   V(VectorKeyedStoreICTrampoline)           \
@@ -239,6 +241,8 @@ class CodeStub BASE_EMBEDDED {
   virtual ExtraICState GetExtraICState() const { return kNoExtraICState; }
   virtual Code::StubType GetStubType() const { return Code::NORMAL; }
 
+  Code::Flags GetCodeFlags() const;
+
   friend std::ostream& operator<<(std::ostream& os, const CodeStub& s) {
     s.PrintName(os);
     return os;
@@ -322,8 +326,10 @@ class CodeStub BASE_EMBEDDED {
 
 
 #define DEFINE_CODE_STUB(NAME, SUPER)                      \
- protected:                                                \
+ public:                                                   \
   inline Major MajorKey() const override { return NAME; }; \
+                                                           \
+ protected:                                                \
   DEFINE_CODE_STUB_BASE(NAME##Stub, SUPER)
 
 
@@ -919,6 +925,7 @@ class CallICStub: public PlatformCodeStub {
  protected:
   int arg_count() const { return state().argc(); }
   ConvertReceiverMode convert_mode() const { return state().convert_mode(); }
+  TailCallMode tail_call_mode() const { return state().tail_call_mode(); }
 
   CallICState state() const {
     return CallICState(static_cast<ExtraICState>(minor_key_));
@@ -1745,10 +1752,8 @@ class CEntryStub : public PlatformCodeStub {
       : PlatformCodeStub(isolate) {
     minor_key_ = SaveDoublesBits::encode(save_doubles == kSaveFPRegs) |
                  ArgvMode::encode(argv_mode == kArgvInRegister);
-    DCHECK(result_size == 1 || result_size == 2);
-#if _WIN64 || V8_TARGET_ARCH_PPC
+    DCHECK(result_size == 1 || result_size == 2 || result_size == 3);
     minor_key_ = ResultSizeBits::update(minor_key_, result_size);
-#endif  // _WIN64
   }
 
   // The version of this stub that doesn't save doubles is generated ahead of
@@ -1760,9 +1765,7 @@ class CEntryStub : public PlatformCodeStub {
  private:
   bool save_doubles() const { return SaveDoublesBits::decode(minor_key_); }
   bool argv_in_register() const { return ArgvMode::decode(minor_key_); }
-#if _WIN64 || V8_TARGET_ARCH_PPC
   int result_size() const { return ResultSizeBits::decode(minor_key_); }
-#endif  // _WIN64
 
   bool NeedsImmovableCode() override;
 
@@ -1848,6 +1851,20 @@ class ArgumentsAccessStub: public PlatformCodeStub {
   class TypeBits : public BitField<Type, 0, 2> {};
 
   DEFINE_PLATFORM_CODE_STUB(ArgumentsAccess, PlatformCodeStub);
+};
+
+
+class RestParamAccessStub : public PlatformCodeStub {
+ public:
+  explicit RestParamAccessStub(Isolate* isolate) : PlatformCodeStub(isolate) {}
+
+ private:
+  void GenerateNew(MacroAssembler* masm);
+
+  void PrintName(std::ostream& os) const override;  // NOLINT
+
+  DEFINE_CALL_INTERFACE_DESCRIPTOR(RestParamAccess);
+  DEFINE_PLATFORM_CODE_STUB(RestParamAccess, PlatformCodeStub);
 };
 
 
@@ -2709,6 +2726,9 @@ class StoreElementStub : public PlatformCodeStub {
   StoreElementStub(Isolate* isolate, ElementsKind elements_kind,
                    KeyedAccessStoreMode mode)
       : PlatformCodeStub(isolate) {
+    // TODO(jkummerow): Rename this stub to StoreSlowElementStub,
+    // drop elements_kind parameter.
+    DCHECK_EQ(DICTIONARY_ELEMENTS, elements_kind);
     minor_key_ = ElementsKindBits::encode(elements_kind) |
                  CommonStoreModeBits::encode(mode);
   }
@@ -2932,6 +2952,15 @@ class ToStringStub final : public PlatformCodeStub {
 
   DEFINE_CALL_INTERFACE_DESCRIPTOR(ToString);
   DEFINE_PLATFORM_CODE_STUB(ToString, PlatformCodeStub);
+};
+
+
+class ToNameStub final : public PlatformCodeStub {
+ public:
+  explicit ToNameStub(Isolate* isolate) : PlatformCodeStub(isolate) {}
+
+  DEFINE_CALL_INTERFACE_DESCRIPTOR(ToName);
+  DEFINE_PLATFORM_CODE_STUB(ToName, PlatformCodeStub);
 };
 
 

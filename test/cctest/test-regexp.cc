@@ -25,21 +25,19 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// TODO(mythria): Remove this define after this flag is turned on globally
-#define V8_IMMINENT_DEPRECATION_WARNINGS
-
 #include <cstdlib>
 #include <sstream>
 
+#include "include/v8.h"
 #include "src/v8.h"
 
 #include "src/ast/ast.h"
 #include "src/char-predicates-inl.h"
 #include "src/ostreams.h"
-#include "src/parsing/parser.h"
 #include "src/regexp/jsregexp.h"
 #include "src/regexp/regexp-macro-assembler.h"
 #include "src/regexp/regexp-macro-assembler-irregexp.h"
+#include "src/regexp/regexp-parser.h"
 #include "src/splay-tree-inl.h"
 #include "src/string-stream.h"
 #ifdef V8_INTERPRETED_REGEXP
@@ -98,21 +96,27 @@ static bool CheckParse(const char* input) {
   FlatStringReader reader(CcTest::i_isolate(), CStrVector(input));
   RegExpCompileData result;
   return v8::internal::RegExpParser::ParseRegExp(
-      CcTest::i_isolate(), &zone, &reader, false, false, &result);
+      CcTest::i_isolate(), &zone, &reader, JSRegExp::kNone, &result);
 }
 
 
-static void CheckParseEq(const char* input, const char* expected) {
+static void CheckParseEq(const char* input, const char* expected,
+                         bool unicode = false) {
   v8::HandleScope scope(CcTest::isolate());
   Zone zone;
   FlatStringReader reader(CcTest::i_isolate(), CStrVector(input));
   RegExpCompileData result;
-  CHECK(v8::internal::RegExpParser::ParseRegExp(
-      CcTest::i_isolate(), &zone, &reader, false, false, &result));
+  JSRegExp::Flags flags = JSRegExp::kNone;
+  if (unicode) flags |= JSRegExp::kUnicode;
+  CHECK(v8::internal::RegExpParser::ParseRegExp(CcTest::i_isolate(), &zone,
+                                                &reader, flags, &result));
   CHECK(result.tree != NULL);
   CHECK(result.error.is_null());
   std::ostringstream os;
   result.tree->Print(os, &zone);
+  if (strcmp(expected, os.str().c_str()) != 0) {
+    printf("%s | %s\n", expected, os.str().c_str());
+  }
   CHECK_EQ(0, strcmp(expected, os.str().c_str()));
 }
 
@@ -123,7 +127,7 @@ static bool CheckSimple(const char* input) {
   FlatStringReader reader(CcTest::i_isolate(), CStrVector(input));
   RegExpCompileData result;
   CHECK(v8::internal::RegExpParser::ParseRegExp(
-      CcTest::i_isolate(), &zone, &reader, false, false, &result));
+      CcTest::i_isolate(), &zone, &reader, JSRegExp::kNone, &result));
   CHECK(result.tree != NULL);
   CHECK(result.error.is_null());
   return result.simple;
@@ -141,7 +145,7 @@ static MinMaxPair CheckMinMaxMatch(const char* input) {
   FlatStringReader reader(CcTest::i_isolate(), CStrVector(input));
   RegExpCompileData result;
   CHECK(v8::internal::RegExpParser::ParseRegExp(
-      CcTest::i_isolate(), &zone, &reader, false, false, &result));
+      CcTest::i_isolate(), &zone, &reader, JSRegExp::kNone, &result));
   CHECK(result.tree != NULL);
   CHECK(result.error.is_null());
   int min_match = result.tree->min_match();
@@ -162,6 +166,7 @@ static MinMaxPair CheckMinMaxMatch(const char* input) {
 
 void TestRegExpParser(bool lookbehind) {
   FLAG_harmony_regexp_lookbehind = lookbehind;
+  FLAG_harmony_unicode_regexps = true;
 
   CHECK_PARSE_ERROR("?");
 
@@ -203,8 +208,8 @@ void TestRegExpParser(bool lookbehind) {
   }
   CheckParseEq("()", "(^ %)");
   CheckParseEq("(?=)", "(-> + %)");
-  CheckParseEq("[]", "^[\\x00-\\uffff]");  // Doesn't compile on windows
-  CheckParseEq("[^]", "[\\x00-\\uffff]");  // \uffff isn't in codepage 1252
+  CheckParseEq("[]", "^[\\x00-\\u{10ffff}]");  // Doesn't compile on windows
+  CheckParseEq("[^]", "[\\x00-\\u{10ffff}]");  // \uffff isn't in codepage 1252
   CheckParseEq("[x]", "[x]");
   CheckParseEq("[xyz]", "[x y z]");
   CheckParseEq("[a-zA-Z0-9]", "[a-z A-Z 0-9]");
@@ -272,6 +277,7 @@ void TestRegExpParser(bool lookbehind) {
   CheckParseEq("(a)\\1", "(: (^ 'a') (<- 1))");
   CheckParseEq("(a\\1)", "(^ 'a')");
   CheckParseEq("(\\1a)", "(^ 'a')");
+  CheckParseEq("(\\2)(\\1)", "(: (^ (<- 2)) (^ (<- 1)))");
   CheckParseEq("(?=a)?a", "'a'");
   CheckParseEq("(?=a){0,10}a", "'a'");
   CheckParseEq("(?=a){1,10}a", "(: (-> + 'a') 'a')");
@@ -302,6 +308,19 @@ void TestRegExpParser(bool lookbehind) {
   CheckParseEq("\\u0034", "'\x34'");
   CheckParseEq("\\u003z", "'u003z'");
   CheckParseEq("foo[z]*", "(: 'foo' (# 0 - g [z]))");
+
+  // Unicode regexps
+  CheckParseEq("\\u{12345}", "'\\ud808\\udf45'", true);
+  CheckParseEq("\\u{12345}\\u{23456}", "(! '\\ud808\\udf45' '\\ud84d\\udc56')",
+               true);
+  CheckParseEq("\\u{12345}|\\u{23456}", "(| '\\ud808\\udf45' '\\ud84d\\udc56')",
+               true);
+  CheckParseEq("\\u{12345}{3}", "(# 3 3 g '\\ud808\\udf45')", true);
+  CheckParseEq("\\u{12345}*", "(# 0 - g '\\ud808\\udf45')", true);
+
+  CheckParseEq("\\ud808\\udf45*", "(# 0 - g '\\ud808\\udf45')", true);
+  CheckParseEq("[\\ud808\\udf45-\\ud809\\udccc]", "[\\u{012345}-\\u{0124cc}]",
+               true);
 
   CHECK_SIMPLE("", false);
   CHECK_SIMPLE("a", true);
@@ -378,8 +397,8 @@ void TestRegExpParser(bool lookbehind) {
   CHECK_MIN_MAX("(?:ab)|cde", 2, 3);
   CHECK_MIN_MAX("(ab)", 2, 2);
   CHECK_MIN_MAX("(ab|cde)", 2, 3);
-  CHECK_MIN_MAX("(ab)\\1", 2, 4);
-  CHECK_MIN_MAX("(ab|cde)\\1", 2, 6);
+  CHECK_MIN_MAX("(ab)\\1", 2, RegExpTree::kInfinity);
+  CHECK_MIN_MAX("(ab|cde)\\1", 2, RegExpTree::kInfinity);
   CHECK_MIN_MAX("(?:ab)?", 0, 2);
   CHECK_MIN_MAX("(?:ab)*", 0, RegExpTree::kInfinity);
   CHECK_MIN_MAX("(?:ab)+", 2, RegExpTree::kInfinity);
@@ -441,7 +460,7 @@ static void ExpectError(const char* input,
   FlatStringReader reader(CcTest::i_isolate(), CStrVector(input));
   RegExpCompileData result;
   CHECK(!v8::internal::RegExpParser::ParseRegExp(
-            CcTest::i_isolate(), &zone, &reader, false, false, &result));
+      CcTest::i_isolate(), &zone, &reader, JSRegExp::kNone, &result));
   CHECK(result.tree == NULL);
   CHECK(!result.error.is_null());
   v8::base::SmartArrayPointer<char> str = result.error->ToCString(ALLOW_NULLS);
@@ -510,7 +529,7 @@ static void TestCharacterClassEscapes(uc16 c, bool (pred)(uc16 c)) {
   ZoneList<CharacterRange>* ranges =
       new(&zone) ZoneList<CharacterRange>(2, &zone);
   CharacterRange::AddClassEscape(c, ranges, &zone);
-  for (unsigned i = 0; i < (1 << 16); i++) {
+  for (uc32 i = 0; i < (1 << 16); i++) {
     bool in_class = false;
     for (int j = 0; !in_class && j < ranges->length(); j++) {
       CharacterRange& range = ranges->at(j);
@@ -537,17 +556,19 @@ static RegExpNode* Compile(const char* input, bool multiline, bool unicode,
   Isolate* isolate = CcTest::i_isolate();
   FlatStringReader reader(isolate, CStrVector(input));
   RegExpCompileData compile_data;
+  JSRegExp::Flags flags = JSRegExp::kNone;
+  if (multiline) flags = JSRegExp::kMultiline;
+  if (unicode) flags = JSRegExp::kUnicode;
   if (!v8::internal::RegExpParser::ParseRegExp(CcTest::i_isolate(), zone,
-                                               &reader, multiline, unicode,
-                                               &compile_data))
+                                               &reader, flags, &compile_data))
     return NULL;
   Handle<String> pattern = isolate->factory()
                                ->NewStringFromUtf8(CStrVector(input))
                                .ToHandleChecked();
   Handle<String> sample_subject =
       isolate->factory()->NewStringFromUtf8(CStrVector("")).ToHandleChecked();
-  RegExpEngine::Compile(isolate, zone, &compile_data, false, false, multiline,
-                        false, pattern, sample_subject, is_one_byte);
+  RegExpEngine::Compile(isolate, zone, &compile_data, flags, pattern,
+                        sample_subject, is_one_byte);
   return compile_data.node;
 }
 
@@ -1165,16 +1186,16 @@ TEST(MacroAssemblerNativeBackRefNoCase) {
   m.WriteCurrentPositionToRegister(2, 0);
   m.AdvanceCurrentPosition(3);
   m.WriteCurrentPositionToRegister(3, 0);
-  m.CheckNotBackReferenceIgnoreCase(2, false, &fail);  // Match "AbC".
-  m.CheckNotBackReferenceIgnoreCase(2, false, &fail);  // Match "ABC".
+  m.CheckNotBackReferenceIgnoreCase(2, false, false, &fail);  // Match "AbC".
+  m.CheckNotBackReferenceIgnoreCase(2, false, false, &fail);  // Match "ABC".
   Label expected_fail;
-  m.CheckNotBackReferenceIgnoreCase(2, false, &expected_fail);
+  m.CheckNotBackReferenceIgnoreCase(2, false, false, &expected_fail);
   m.Bind(&fail);
   m.Fail();
 
   m.Bind(&expected_fail);
   m.AdvanceCurrentPosition(3);  // Skip "xYz"
-  m.CheckNotBackReferenceIgnoreCase(2, false, &succ);
+  m.CheckNotBackReferenceIgnoreCase(2, false, false, &succ);
   m.Fail();
 
   m.Bind(&succ);
@@ -1608,7 +1629,9 @@ static void TestRangeCaseIndependence(Isolate* isolate, CharacterRange input,
   int count = expected.length();
   ZoneList<CharacterRange>* list =
       new(&zone) ZoneList<CharacterRange>(count, &zone);
-  input.AddCaseEquivalents(isolate, &zone, list, false);
+  list->Add(input, &zone);
+  CharacterRange::AddCaseEquivalents(isolate, &zone, list, false);
+  list->Remove(0);  // Remove the input before checking results.
   CHECK_EQ(count, list->length());
   for (int i = 0; i < list->length(); i++) {
     CHECK_EQ(expected[i].from(), list->at(i).from());
@@ -1656,7 +1679,7 @@ TEST(CharacterRangeCaseIndependence) {
 }
 
 
-static bool InClass(uc16 c, ZoneList<CharacterRange>* ranges) {
+static bool InClass(uc32 c, ZoneList<CharacterRange>* ranges) {
   if (ranges == NULL)
     return false;
   for (int i = 0; i < ranges->length(); i++) {
@@ -1668,29 +1691,46 @@ static bool InClass(uc16 c, ZoneList<CharacterRange>* ranges) {
 }
 
 
-TEST(CharClassDifference) {
+TEST(UnicodeRangeSplitter) {
   Zone zone;
   ZoneList<CharacterRange>* base =
       new(&zone) ZoneList<CharacterRange>(1, &zone);
   base->Add(CharacterRange::Everything(), &zone);
-  Vector<const int> overlay = CharacterRange::GetWordBounds();
-  ZoneList<CharacterRange>* included = NULL;
-  ZoneList<CharacterRange>* excluded = NULL;
-  CharacterRange::Split(base, overlay, &included, &excluded, &zone);
-  for (int i = 0; i < (1 << 16); i++) {
-    bool in_base = InClass(i, base);
-    if (in_base) {
-      bool in_overlay = false;
-      for (int j = 0; !in_overlay && j < overlay.length(); j += 2) {
-        if (overlay[j] <= i && i < overlay[j+1])
-          in_overlay = true;
-      }
-      CHECK_EQ(in_overlay, InClass(i, included));
-      CHECK_EQ(!in_overlay, InClass(i, excluded));
-    } else {
-      CHECK(!InClass(i, included));
-      CHECK(!InClass(i, excluded));
-    }
+  UnicodeRangeSplitter splitter(&zone, base);
+  // BMP
+  for (uc32 c = 0; c < 0xd800; c++) {
+    CHECK(InClass(c, splitter.bmp()));
+    CHECK(!InClass(c, splitter.lead_surrogates()));
+    CHECK(!InClass(c, splitter.trail_surrogates()));
+    CHECK(!InClass(c, splitter.non_bmp()));
+  }
+  // Lead surrogates
+  for (uc32 c = 0xd800; c < 0xdbff; c++) {
+    CHECK(!InClass(c, splitter.bmp()));
+    CHECK(InClass(c, splitter.lead_surrogates()));
+    CHECK(!InClass(c, splitter.trail_surrogates()));
+    CHECK(!InClass(c, splitter.non_bmp()));
+  }
+  // Trail surrogates
+  for (uc32 c = 0xdc00; c < 0xdfff; c++) {
+    CHECK(!InClass(c, splitter.bmp()));
+    CHECK(!InClass(c, splitter.lead_surrogates()));
+    CHECK(InClass(c, splitter.trail_surrogates()));
+    CHECK(!InClass(c, splitter.non_bmp()));
+  }
+  // BMP
+  for (uc32 c = 0xe000; c < 0xffff; c++) {
+    CHECK(InClass(c, splitter.bmp()));
+    CHECK(!InClass(c, splitter.lead_surrogates()));
+    CHECK(!InClass(c, splitter.trail_surrogates()));
+    CHECK(!InClass(c, splitter.non_bmp()));
+  }
+  // Non-BMP
+  for (uc32 c = 0x10000; c < 0x10ffff; c++) {
+    CHECK(!InClass(c, splitter.bmp()));
+    CHECK(!InClass(c, splitter.lead_surrogates()));
+    CHECK(!InClass(c, splitter.trail_surrogates()));
+    CHECK(InClass(c, splitter.non_bmp()));
   }
 }
 
@@ -1845,4 +1885,83 @@ TEST(CharacterRangeMerge) {
 
 TEST(Graph) {
   Execute("\\b\\w+\\b", false, true, true);
+}
+
+
+namespace {
+
+int* global_use_counts = NULL;
+
+void MockUseCounterCallback(v8::Isolate* isolate,
+                            v8::Isolate::UseCounterFeature feature) {
+  ++global_use_counts[feature];
+}
+}
+
+
+// Test that ES2015 RegExp compatibility fixes are in place, that they
+// are not overly broad, and the appropriate UseCounters are incremented
+TEST(UseCountRegExp) {
+  i::FLAG_harmony_regexps = true;
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+  LocalContext env;
+  int use_counts[v8::Isolate::kUseCounterFeatureCount] = {};
+  global_use_counts = use_counts;
+  CcTest::isolate()->SetUseCounterCallback(MockUseCounterCallback);
+
+  // Compat fix: RegExp.prototype.sticky == undefined; UseCounter tracks it
+  v8::Local<v8::Value> resultSticky = CompileRun("RegExp.prototype.sticky");
+  CHECK_EQ(1, use_counts[v8::Isolate::kRegExpPrototypeStickyGetter]);
+  CHECK_EQ(0, use_counts[v8::Isolate::kRegExpPrototypeToString]);
+  CHECK(resultSticky->IsUndefined());
+
+  // re.sticky has approriate value and doesn't touch UseCounter
+  v8::Local<v8::Value> resultReSticky = CompileRun("/a/.sticky");
+  CHECK_EQ(1, use_counts[v8::Isolate::kRegExpPrototypeStickyGetter]);
+  CHECK_EQ(0, use_counts[v8::Isolate::kRegExpPrototypeToString]);
+  CHECK(resultReSticky->IsFalse());
+
+  // When the getter is caleld on another object, throw an exception
+  // and don't increment the UseCounter
+  v8::Local<v8::Value> resultStickyError = CompileRun(
+      "var exception;"
+      "try { "
+      "  Object.getOwnPropertyDescriptor(RegExp.prototype, 'sticky')"
+      "      .get.call(null);"
+      "} catch (e) {"
+      "  exception = e;"
+      "}"
+      "exception");
+  CHECK_EQ(1, use_counts[v8::Isolate::kRegExpPrototypeStickyGetter]);
+  CHECK_EQ(0, use_counts[v8::Isolate::kRegExpPrototypeToString]);
+  CHECK(resultStickyError->IsObject());
+
+  // RegExp.prototype.toString() returns '/(?:)/' as a compatibility fix;
+  // a UseCounter is incremented to track it.
+  v8::Local<v8::Value> resultToString =
+      CompileRun("RegExp.prototype.toString().length");
+  CHECK_EQ(1, use_counts[v8::Isolate::kRegExpPrototypeStickyGetter]);
+  CHECK_EQ(1, use_counts[v8::Isolate::kRegExpPrototypeToString]);
+  CHECK(resultToString->IsInt32());
+  CHECK_EQ(6,
+           resultToString->Int32Value(isolate->GetCurrentContext()).FromJust());
+
+  // .toString() works on normal RegExps
+  v8::Local<v8::Value> resultReToString = CompileRun("/a/.toString().length");
+  CHECK_EQ(1, use_counts[v8::Isolate::kRegExpPrototypeStickyGetter]);
+  CHECK_EQ(1, use_counts[v8::Isolate::kRegExpPrototypeToString]);
+  CHECK(resultReToString->IsInt32());
+  CHECK_EQ(
+      3, resultReToString->Int32Value(isolate->GetCurrentContext()).FromJust());
+
+  // .toString() throws on non-RegExps that aren't RegExp.prototype
+  v8::Local<v8::Value> resultToStringError = CompileRun(
+      "var exception;"
+      "try { RegExp.prototype.toString.call(null) }"
+      "catch (e) { exception = e; }"
+      "exception");
+  CHECK_EQ(1, use_counts[v8::Isolate::kRegExpPrototypeStickyGetter]);
+  CHECK_EQ(1, use_counts[v8::Isolate::kRegExpPrototypeToString]);
+  CHECK(resultToStringError->IsObject());
 }

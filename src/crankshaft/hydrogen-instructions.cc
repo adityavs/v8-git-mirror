@@ -811,7 +811,6 @@ bool HInstruction::CanDeoptimize() {
     case HValue::kLoadNamedField:
     case HValue::kLoadNamedGeneric:
     case HValue::kLoadRoot:
-    case HValue::kMapEnumLength:
     case HValue::kMathMinMax:
     case HValue::kParameter:
     case HValue::kPhi:
@@ -849,7 +848,6 @@ bool HInstruction::CanDeoptimize() {
     case HValue::kCheckSmi:
     case HValue::kCheckValue:
     case HValue::kClampToUint8:
-    case HValue::kDateField:
     case HValue::kDeoptimize:
     case HValue::kDiv:
     case HValue::kForInCacheArray:

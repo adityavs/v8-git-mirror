@@ -2,9 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(jochen): Remove this after the setting is turned on globally.
-#define V8_IMMINENT_DEPRECATION_WARNINGS
-
 #include "src/v8.h"
 
 #include "src/ast/ast.h"
@@ -19,14 +16,15 @@
 #include "test/cctest/expression-type-collector-macros.h"
 
 // Macros for function types.
-#define FUNC_V_TYPE Bounds(Type::Function(Type::Undefined(zone), zone))
+#define FUNC_FOREIGN_TYPE Bounds(Type::Function(Type::Any(), zone))
+#define FUNC_V_TYPE Bounds(Type::Function(Type::Undefined(), zone))
 #define FUNC_I_TYPE Bounds(Type::Function(cache.kAsmSigned, zone))
 #define FUNC_F_TYPE Bounds(Type::Function(cache.kAsmFloat, zone))
 #define FUNC_D_TYPE Bounds(Type::Function(cache.kAsmDouble, zone))
 #define FUNC_D2D_TYPE \
   Bounds(Type::Function(cache.kAsmDouble, cache.kAsmDouble, zone))
 #define FUNC_N2F_TYPE \
-  Bounds(Type::Function(cache.kAsmFloat, Type::Number(zone), zone))
+  Bounds(Type::Function(cache.kAsmFloat, Type::Number(), zone))
 #define FUNC_I2I_TYPE \
   Bounds(Type::Function(cache.kAsmSigned, cache.kAsmInt, zone))
 #define FUNC_II2D_TYPE \
@@ -36,8 +34,10 @@
 #define FUNC_DD2D_TYPE                                                        \
   Bounds(Type::Function(cache.kAsmDouble, cache.kAsmDouble, cache.kAsmDouble, \
                         zone))
+#define FUNC_NN2N_TYPE \
+  Bounds(Type::Function(Type::Number(), Type::Number(), Type::Number(), zone))
 #define FUNC_N2N_TYPE \
-  Bounds(Type::Function(Type::Number(zone), Type::Number(zone), zone))
+  Bounds(Type::Function(Type::Number(), Type::Number(), zone))
 
 // Macros for array types.
 #define FLOAT64_ARRAY_TYPE Bounds(Type::Array(cache.kAsmDouble, zone))
@@ -265,7 +265,7 @@ TEST(ValidateMinimum) {
         }
       }
       // "use asm";
-      CHECK_EXPR(Literal, Bounds(Type::String(zone)));
+      CHECK_EXPR(Literal, Bounds(Type::String()));
       // var exp = stdlib.Math.exp;
       CHECK_EXPR(Assignment, FUNC_D2D_TYPE) {
         CHECK_VAR(exp, FUNC_D2D_TYPE);
@@ -306,6 +306,52 @@ TEST(ValidateMinimum) {
     }
   }
   CHECK_TYPES_END
+}
+
+
+TEST(MissingUseAsm) {
+  const char test_function[] =
+      "function foo() {\n"
+      "  function bar() {}\n"
+      "  return { bar: bar };\n"
+      "}\n";
+  v8::V8::Initialize();
+  HandleAndZoneScope handles;
+  Zone* zone = handles.main_zone();
+  ZoneVector<ExpressionTypeEntry> types(zone);
+  CHECK_EQ("asm: line 1: missing \"use asm\"\n",
+           Validate(zone, test_function, &types));
+}
+
+
+TEST(WrongUseAsm) {
+  const char test_function[] =
+      "function foo() {\n"
+      "  \"use wasm\"\n"
+      "  function bar() {}\n"
+      "  return { bar: bar };\n"
+      "}\n";
+  v8::V8::Initialize();
+  HandleAndZoneScope handles;
+  Zone* zone = handles.main_zone();
+  ZoneVector<ExpressionTypeEntry> types(zone);
+  CHECK_EQ("asm: line 1: missing \"use asm\"\n",
+           Validate(zone, test_function, &types));
+}
+
+
+TEST(MissingReturnExports) {
+  const char test_function[] =
+      "function foo() {\n"
+      "  \"use asm\"\n"
+      "  function bar() {}\n"
+      "}\n";
+  v8::V8::Initialize();
+  HandleAndZoneScope handles;
+  Zone* zone = handles.main_zone();
+  ZoneVector<ExpressionTypeEntry> types(zone);
+  CHECK_EQ("asm: line 2: last statement in module is not a return\n",
+           Validate(zone, test_function, &types));
 }
 
 
@@ -402,10 +448,10 @@ namespace {
 
 void CheckStdlibShortcuts1(Zone* zone, ZoneVector<ExpressionTypeEntry>& types,
                            size_t& index, int& depth, TypeCache& cache) {
-  // var exp = stdlib.*; (D * 12)
+  // var exp = stdlib.*;
   CHECK_VAR_SHORTCUT(Infinity, Bounds(cache.kAsmDouble));
   CHECK_VAR_SHORTCUT(NaN, Bounds(cache.kAsmDouble));
-  // var x = stdlib.Math.x;  D2D
+  // var x = stdlib.Math.x;
   CHECK_VAR_MATH_SHORTCUT(acos, FUNC_D2D_TYPE);
   CHECK_VAR_MATH_SHORTCUT(asin, FUNC_D2D_TYPE);
   CHECK_VAR_MATH_SHORTCUT(atan, FUNC_D2D_TYPE);
@@ -414,15 +460,17 @@ void CheckStdlibShortcuts1(Zone* zone, ZoneVector<ExpressionTypeEntry>& types,
   CHECK_VAR_MATH_SHORTCUT(tan, FUNC_D2D_TYPE);
   CHECK_VAR_MATH_SHORTCUT(exp, FUNC_D2D_TYPE);
   CHECK_VAR_MATH_SHORTCUT(log, FUNC_D2D_TYPE);
-  CHECK_VAR_MATH_SHORTCUT(ceil, FUNC_D2D_TYPE);
-  CHECK_VAR_MATH_SHORTCUT(floor, FUNC_D2D_TYPE);
-  CHECK_VAR_MATH_SHORTCUT(sqrt, FUNC_D2D_TYPE);
-  // var exp = stdlib.Math.*; (DD2D * 12)
-  CHECK_VAR_MATH_SHORTCUT(min, FUNC_DD2D_TYPE);
-  CHECK_VAR_MATH_SHORTCUT(max, FUNC_DD2D_TYPE);
+
+  CHECK_VAR_MATH_SHORTCUT(ceil, FUNC_N2N_TYPE);
+  CHECK_VAR_MATH_SHORTCUT(floor, FUNC_N2N_TYPE);
+  CHECK_VAR_MATH_SHORTCUT(sqrt, FUNC_N2N_TYPE);
+
+  CHECK_VAR_MATH_SHORTCUT(min, FUNC_NN2N_TYPE);
+  CHECK_VAR_MATH_SHORTCUT(max, FUNC_NN2N_TYPE);
+
   CHECK_VAR_MATH_SHORTCUT(atan2, FUNC_DD2D_TYPE);
   CHECK_VAR_MATH_SHORTCUT(pow, FUNC_DD2D_TYPE);
-  // Special ones.
+
   CHECK_VAR_MATH_SHORTCUT(abs, FUNC_N2N_TYPE);
   CHECK_VAR_MATH_SHORTCUT(imul, FUNC_II2I_TYPE);
   CHECK_VAR_MATH_SHORTCUT(fround, FUNC_N2F_TYPE);
@@ -470,11 +518,10 @@ void CheckStdlibShortcuts2(Zone* zone, ZoneVector<ExpressionTypeEntry>& types,
     CHECK_EXPR(FunctionLiteral, Bounds::Unbounded()) {
 #define CHECK_FUNC_TYPES_END_1()                           \
   /* "use asm"; */                                         \
-  CHECK_EXPR(Literal, Bounds(Type::String(zone)));         \
+  CHECK_EXPR(Literal, Bounds(Type::String()));             \
   /* stdlib shortcuts. */                                  \
   CheckStdlibShortcuts1(zone, types, index, depth, cache); \
   CheckStdlibShortcuts2(zone, types, index, depth, cache);
-
 
 #define CHECK_FUNC_TYPES_END_2()                   \
   /* return { foo: foo }; */                       \
@@ -516,10 +563,10 @@ TEST(ReturnVoid) {
       "function foo() { bar(); }") {
     CHECK_EXPR(FunctionLiteral, FUNC_V_TYPE) {
       // return undefined;
-      CHECK_EXPR(Literal, Bounds(Type::Undefined(zone)));
+      CHECK_EXPR(Literal, Bounds(Type::Undefined()));
     }
     CHECK_EXPR(FunctionLiteral, FUNC_V_TYPE) {
-      CHECK_EXPR(Call, Bounds(Type::Undefined(zone))) {
+      CHECK_EXPR(Call, Bounds(Type::Undefined())) {
         CHECK_VAR(bar, FUNC_V_TYPE);
       }
     }
@@ -534,7 +581,7 @@ TEST(EmptyBody) {
       "function foo() { bar(); }") {
     CHECK_EXPR(FunctionLiteral, FUNC_V_TYPE);
     CHECK_EXPR(FunctionLiteral, FUNC_V_TYPE) {
-      CHECK_EXPR(Call, Bounds(Type::Undefined(zone))) {
+      CHECK_EXPR(Call, Bounds(Type::Undefined())) {
         CHECK_VAR(bar, FUNC_V_TYPE);
       }
     }
@@ -554,7 +601,7 @@ TEST(DoesNothing) {
       }
     }
     CHECK_EXPR(FunctionLiteral, FUNC_V_TYPE) {
-      CHECK_EXPR(Call, Bounds(Type::Undefined(zone))) {
+      CHECK_EXPR(Call, Bounds(Type::Undefined())) {
         CHECK_VAR(bar, FUNC_V_TYPE);
       }
     }
@@ -1018,7 +1065,7 @@ TEST(UnsignedDivide) {
         CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
       }
       CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmSigned)) {
-        CHECK_EXPR(BinaryOperation, Bounds(Type::None(zone), Type::Any(zone))) {
+        CHECK_EXPR(BinaryOperation, Bounds(Type::None(), Type::Any())) {
           CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmUnsigned)) {
             CHECK_VAR(x, Bounds(cache.kAsmInt));
             CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
@@ -1474,7 +1521,9 @@ TEST(FunctionTables) {
           CHECK_EXPR(Property, FUNC_I2I_TYPE) {
             CHECK_VAR(table1, FUNC_I2I_ARRAY_TYPE);
             CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmSigned)) {
-              CHECK_VAR(x, Bounds(cache.kAsmSigned));
+              // TODO(bradnelson): revert this
+              // CHECK_VAR(x, Bounds(cache.kAsmSigned));
+              CHECK_VAR(x, Bounds(cache.kAsmInt));
               CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
             }
           }
@@ -1676,8 +1725,8 @@ TEST(ForeignFunction) {
       "function foo() { bar(); }") {
     CHECK_EXPR(FunctionLiteral, FUNC_I_TYPE) {
       CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmSigned)) {
-        CHECK_EXPR(Call, Bounds(Type::Number(zone))) {
-          CHECK_VAR(baz, Bounds(Type::Any(zone)));
+        CHECK_EXPR(Call, Bounds(cache.kAsmSigned)) {
+          CHECK_VAR(baz, FUNC_FOREIGN_TYPE);
           CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
           CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
         }
@@ -1691,9 +1740,9 @@ TEST(ForeignFunction) {
     }
   }
   CHECK_FUNC_TYPES_END_1()
-  CHECK_EXPR(Assignment, Bounds(Type::Any(zone))) {
-    CHECK_VAR(baz, Bounds(Type::Any(zone)));
-    CHECK_EXPR(Property, Bounds(Type::Any(zone))) {
+  CHECK_EXPR(Assignment, Bounds(FUNC_FOREIGN_TYPE)) {
+    CHECK_VAR(baz, Bounds(FUNC_FOREIGN_TYPE));
+    CHECK_EXPR(Property, Bounds(FUNC_FOREIGN_TYPE)) {
       CHECK_VAR(foreign, Bounds::Unbounded());
       CHECK_EXPR(Literal, Bounds::Unbounded());
     }
@@ -1733,6 +1782,24 @@ TEST(BadArrayAssignment) {
 }
 
 
+TEST(BadStandardFunctionCallOutside) {
+  CHECK_FUNC_ERROR(
+      "var s0 = sin(0);\n"
+      "function bar() { }\n"
+      "function foo() { bar(); }",
+      "asm: line 39: illegal variable reference in module body\n");
+}
+
+
+TEST(BadFunctionCallOutside) {
+  CHECK_FUNC_ERROR(
+      "function bar() { return 0.0; }\n"
+      "var s0 = bar(0);\n"
+      "function foo() { bar(); }",
+      "asm: line 40: illegal variable reference in module body\n");
+}
+
+
 TEST(NestedVariableAssignment) {
   CHECK_FUNC_TYPES_BEGIN(
       "function bar() { var x = 0; x = x = 4; }\n"
@@ -1769,7 +1836,7 @@ TEST(NestedAssignmentInHeap) {
         CHECK_EXPR(Property, Bounds::Unbounded()) {
           CHECK_VAR(i8, Bounds(cache.kInt8Array));
           CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmSigned)) {
-            CHECK_EXPR(Assignment, Bounds(cache.kAsmSigned)) {
+            CHECK_EXPR(Assignment, Bounds(cache.kAsmInt)) {
               CHECK_VAR(x, Bounds(cache.kAsmInt));
               CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
             }
@@ -1809,6 +1876,55 @@ TEST(NegativeInteger) {
       CHECK_EXPR(Assignment, Bounds(cache.kAsmInt)) {
         CHECK_VAR(x, Bounds(cache.kAsmInt));
         CHECK_EXPR(Literal, Bounds(cache.kAsmSigned));
+      }
+    }
+    CHECK_SKIP();
+  }
+  CHECK_FUNC_TYPES_END
+}
+
+
+TEST(AbsFunction) {
+  CHECK_FUNC_TYPES_BEGIN(
+      "function bar() { var x = -123.0; x = abs(x); }\n"
+      "function foo() { bar(); }") {
+    CHECK_EXPR(FunctionLiteral, FUNC_V_TYPE) {
+      CHECK_EXPR(Assignment, Bounds(cache.kAsmDouble)) {
+        CHECK_VAR(x, Bounds(cache.kAsmDouble));
+        CHECK_EXPR(Literal, Bounds(cache.kAsmDouble));
+      }
+      CHECK_EXPR(Assignment, Bounds(cache.kAsmDouble)) {
+        CHECK_VAR(x, Bounds(cache.kAsmDouble));
+        CHECK_EXPR(Call, Bounds(cache.kAsmDouble)) {
+          CHECK_VAR(abs, FUNC_N2N_TYPE);
+          CHECK_VAR(x, Bounds(cache.kAsmDouble));
+        }
+      }
+    }
+    CHECK_SKIP();
+  }
+  CHECK_FUNC_TYPES_END
+}
+
+
+TEST(CeilFloat) {
+  CHECK_FUNC_TYPES_BEGIN(
+      "function bar() { var x = fround(3.1); x = ceil(x); }\n"
+      "function foo() { bar(); }") {
+    CHECK_EXPR(FunctionLiteral, FUNC_V_TYPE) {
+      CHECK_EXPR(Assignment, Bounds(cache.kAsmFloat)) {
+        CHECK_VAR(x, Bounds(cache.kAsmFloat));
+        CHECK_EXPR(Call, Bounds(cache.kAsmFloat)) {
+          CHECK_VAR(fround, FUNC_N2F_TYPE);
+          CHECK_EXPR(Literal, Bounds(cache.kAsmDouble));
+        }
+      }
+      CHECK_EXPR(Assignment, Bounds(cache.kAsmFloat)) {
+        CHECK_VAR(x, Bounds(cache.kAsmFloat));
+        CHECK_EXPR(Call, Bounds(cache.kAsmFloat)) {
+          CHECK_VAR(ceil, FUNC_N2N_TYPE);
+          CHECK_VAR(x, Bounds(cache.kAsmFloat));
+        }
       }
     }
     CHECK_SKIP();
@@ -1862,4 +1978,217 @@ TEST(TypeConsistency) {
   CHECK(!cache.kAsmDouble->Is(cache.kAsmSigned));
   CHECK(!cache.kAsmDouble->Is(cache.kAsmFixnum));
   CHECK(!cache.kAsmDouble->Is(cache.kAsmFloat));
+}
+
+
+TEST(SwitchTest) {
+  CHECK_FUNC_TYPES_BEGIN(
+      "function switcher(x) {\n"
+      "  x = x|0;\n"
+      "  switch (x|0) {\n"
+      "    case 1: return 23;\n"
+      "    case 2: return 43;\n"
+      "    default: return 66;\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n"
+      "function foo() { switcher(1); }") {
+    CHECK_EXPR(FunctionLiteral, FUNC_I2I_TYPE) {
+      CHECK_EXPR(Assignment, Bounds(cache.kAsmInt)) {
+        CHECK_VAR(x, Bounds(cache.kAsmInt));
+        CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmSigned)) {
+          CHECK_VAR(x, Bounds(cache.kAsmInt));
+          CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
+        }
+      }
+      CHECK_EXPR(Assignment, Bounds(cache.kAsmInt)) {
+        CHECK_VAR(.switch_tag, Bounds(cache.kAsmInt));
+        CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmSigned)) {
+          CHECK_VAR(x, Bounds(cache.kAsmInt));
+          CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
+        }
+      }
+      CHECK_EXPR(Literal, Bounds(Type::Undefined()));
+      CHECK_VAR(.switch_tag, Bounds(cache.kAsmSigned));
+      // case 1: return 23;
+      CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
+      CHECK_EXPR(Literal, Bounds(cache.kAsmSigned));
+      // case 2: return 43;
+      CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
+      CHECK_EXPR(Literal, Bounds(cache.kAsmSigned));
+      // default: return 66;
+      CHECK_EXPR(Literal, Bounds(cache.kAsmSigned));
+      // return 0;
+      CHECK_EXPR(Literal, Bounds(cache.kAsmSigned));
+    }
+    CHECK_SKIP();
+  }
+  CHECK_FUNC_TYPES_END
+}
+
+
+TEST(BadSwitchRange) {
+  CHECK_FUNC_ERROR(
+      "function bar() { switch (1) { case -1: case 0x7fffffff: } }\n"
+      "function foo() { bar(); }",
+      "asm: line 39: case range too large\n");
+}
+
+
+TEST(DuplicateSwitchCase) {
+  CHECK_FUNC_ERROR(
+      "function bar() { switch (1) { case 0: case 0: } }\n"
+      "function foo() { bar(); }",
+      "asm: line 39: duplicate case value\n");
+}
+
+
+TEST(BadSwitchOrder) {
+  CHECK_FUNC_ERROR(
+      "function bar() { switch (1) { default: case 0: } }\n"
+      "function foo() { bar(); }",
+      "asm: line 39: default case out of order\n");
+}
+
+TEST(BadForeignCall) {
+  const char test_function[] =
+      "function TestModule(stdlib, foreign, buffer) {\n"
+      "  \"use asm\";\n"
+      "  var ffunc = foreign.foo;\n"
+      "  function test1() { var x = 0; ffunc(x); }\n"
+      "  return { testFunc1: test1 };\n"
+      "}\n";
+  v8::V8::Initialize();
+  HandleAndZoneScope handles;
+  Zone* zone = handles.main_zone();
+  ZoneVector<ExpressionTypeEntry> types(zone);
+  CHECK_EQ(
+      "asm: line 4: foreign call argument expected to be int, double, or "
+      "fixnum\n",
+      Validate(zone, test_function, &types));
+}
+
+TEST(BadImports) {
+  const char test_function[] =
+      "function TestModule(stdlib, foreign, buffer) {\n"
+      "  \"use asm\";\n"
+      "  var fint = (foreign.bar | 0) | 0;\n"
+      "  function test1() {}\n"
+      "  return { testFunc1: test1 };\n"
+      "}\n";
+  v8::V8::Initialize();
+  HandleAndZoneScope handles;
+  Zone* zone = handles.main_zone();
+  ZoneVector<ExpressionTypeEntry> types(zone);
+  CHECK_EQ("asm: line 3: illegal computation inside module body\n",
+           Validate(zone, test_function, &types));
+}
+
+TEST(BadVariableReference) {
+  const char test_function[] =
+      "function TestModule(stdlib, foreign, buffer) {\n"
+      "  \"use asm\";\n"
+      "  var x = 0;\n"
+      "  var y = x;\n"
+      "  function test1() {}\n"
+      "  return { testFunc1: test1 };\n"
+      "}\n";
+  v8::V8::Initialize();
+  HandleAndZoneScope handles;
+  Zone* zone = handles.main_zone();
+  ZoneVector<ExpressionTypeEntry> types(zone);
+  CHECK_EQ("asm: line 4: illegal variable reference in module body\n",
+           Validate(zone, test_function, &types));
+}
+
+TEST(Imports) {
+  const char test_function[] =
+      "function TestModule(stdlib, foreign, buffer) {\n"
+      "  \"use asm\";\n"
+      "  var ffunc = foreign.foo;\n"
+      "  var fint = foreign.bar | 0;\n"
+      "  var fdouble = +foreign.baz;\n"
+      "  function test1() { return ffunc(fint|0, fdouble) | 0; }\n"
+      "  function test2() { return +ffunc(fdouble, fint|0); }\n"
+      "  return { testFunc1: test1, testFunc2: test2 };\n"
+      "}\n";
+
+  v8::V8::Initialize();
+  HandleAndZoneScope handles;
+  Zone* zone = handles.main_zone();
+  ZoneVector<ExpressionTypeEntry> types(zone);
+  CHECK_EQ("", Validate(zone, test_function, &types));
+  TypeCache cache;
+
+  CHECK_TYPES_BEGIN {
+    // Module.
+    CHECK_EXPR(FunctionLiteral, Bounds::Unbounded()) {
+      // function test1
+      CHECK_EXPR(FunctionLiteral, FUNC_I_TYPE) {
+        CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmSigned)) {
+          CHECK_EXPR(Call, Bounds(cache.kAsmSigned)) {
+            CHECK_VAR(ffunc, FUNC_FOREIGN_TYPE);
+            CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmSigned)) {
+              CHECK_VAR(fint, Bounds(cache.kAsmInt));
+              CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
+            }
+            CHECK_VAR(fdouble, Bounds(cache.kAsmDouble));
+          }
+          CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
+        }
+      }
+      // function test2
+      CHECK_EXPR(FunctionLiteral, FUNC_D_TYPE) {
+        CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmDouble)) {
+          CHECK_EXPR(Call, Bounds(cache.kAsmDouble)) {
+            CHECK_VAR(ffunc, FUNC_FOREIGN_TYPE);
+            CHECK_VAR(fdouble, Bounds(cache.kAsmDouble));
+            CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmSigned)) {
+              CHECK_VAR(fint, Bounds(cache.kAsmInt));
+              CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
+            }
+          }
+          CHECK_EXPR(Literal, Bounds(cache.kAsmDouble));
+        }
+      }
+      // "use asm";
+      CHECK_EXPR(Literal, Bounds(Type::String()));
+      // var func = foreign.foo;
+      CHECK_EXPR(Assignment, Bounds(FUNC_FOREIGN_TYPE)) {
+        CHECK_VAR(ffunc, Bounds(FUNC_FOREIGN_TYPE));
+        CHECK_EXPR(Property, Bounds(FUNC_FOREIGN_TYPE)) {
+          CHECK_VAR(foreign, Bounds::Unbounded());
+          CHECK_EXPR(Literal, Bounds::Unbounded());
+        }
+      }
+      // var fint = foreign.bar | 0;
+      CHECK_EXPR(Assignment, Bounds(cache.kAsmInt)) {
+        CHECK_VAR(fint, Bounds(cache.kAsmInt));
+        CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmSigned)) {
+          CHECK_EXPR(Property, Bounds(Type::Number())) {
+            CHECK_VAR(foreign, Bounds::Unbounded());
+            CHECK_EXPR(Literal, Bounds::Unbounded());
+          }
+          CHECK_EXPR(Literal, Bounds(cache.kAsmFixnum));
+        }
+      }
+      // var fdouble = +foreign.baz;
+      CHECK_EXPR(Assignment, Bounds(cache.kAsmDouble)) {
+        CHECK_VAR(fdouble, Bounds(cache.kAsmDouble));
+        CHECK_EXPR(BinaryOperation, Bounds(cache.kAsmDouble)) {
+          CHECK_EXPR(Property, Bounds(Type::Number())) {
+            CHECK_VAR(foreign, Bounds::Unbounded());
+            CHECK_EXPR(Literal, Bounds::Unbounded());
+          }
+          CHECK_EXPR(Literal, Bounds(cache.kAsmDouble));
+        }
+      }
+      // return { testFunc1: test1, testFunc2: test2 };
+      CHECK_EXPR(ObjectLiteral, Bounds::Unbounded()) {
+        CHECK_VAR(test1, FUNC_I_TYPE);
+        CHECK_VAR(test2, FUNC_D_TYPE);
+      }
+    }
+  }
+  CHECK_TYPES_END
 }

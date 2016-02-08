@@ -37,6 +37,7 @@ namespace internal {
 // TODO(titzer): arm64 is a pain for aliasing; get rid of these macros
 #define kReturnRegister0 x0
 #define kReturnRegister1 x1
+#define kReturnRegister2 x2
 #define kJSFunctionRegister x1
 #define kContextRegister cp
 #define kInterpreterAccumulatorRegister x0
@@ -724,10 +725,10 @@ class MacroAssembler : public Assembler {
   //
   // Note that unit_size must be specified in bytes. For variants which take a
   // Register count, the unit size must be a power of two.
-  inline void Claim(uint64_t count, uint64_t unit_size = kXRegSize);
+  inline void Claim(int64_t count, uint64_t unit_size = kXRegSize);
   inline void Claim(const Register& count,
                     uint64_t unit_size = kXRegSize);
-  inline void Drop(uint64_t count, uint64_t unit_size = kXRegSize);
+  inline void Drop(int64_t count, uint64_t unit_size = kXRegSize);
   inline void Drop(const Register& count,
                    uint64_t unit_size = kXRegSize);
 
@@ -966,12 +967,23 @@ class MacroAssembler : public Assembler {
   // Abort execution if argument is not a JSFunction, enabled via --debug-code.
   void AssertFunction(Register object);
 
+  // Abort execution if argument is not a JSBoundFunction,
+  // enabled via --debug-code.
+  void AssertBoundFunction(Register object);
+
   // Abort execution if argument is not undefined or an AllocationSite, enabled
   // via --debug-code.
   void AssertUndefinedOrAllocationSite(Register object, Register scratch);
 
   // Abort execution if argument is not a string, enabled via --debug-code.
   void AssertString(Register object);
+
+  // Abort execution if argument is not a positive or zero integer, enabled via
+  // --debug-code.
+  void AssertPositiveOrZero(Register value);
+
+  // Abort execution if argument is not a number (heap number or smi).
+  void AssertNumber(Register value);
 
   void JumpIfHeapNumber(Register object, Label* on_heap_number,
                         SmiCheckType smi_check_type = DONT_DO_SMI_CHECK);
@@ -1086,20 +1098,25 @@ class MacroAssembler : public Assembler {
                    int num_arguments,
                    SaveFPRegsMode save_doubles = kDontSaveFPRegs);
 
-  void CallRuntime(Runtime::FunctionId id,
-                   int num_arguments,
+  // Convenience function: Same as above, but takes the fid instead.
+  void CallRuntime(Runtime::FunctionId fid, int num_arguments,
                    SaveFPRegsMode save_doubles = kDontSaveFPRegs) {
-    CallRuntime(Runtime::FunctionForId(id), num_arguments, save_doubles);
+    CallRuntime(Runtime::FunctionForId(fid), num_arguments, save_doubles);
   }
 
-  void CallRuntimeSaveDoubles(Runtime::FunctionId id) {
-    const Runtime::Function* function = Runtime::FunctionForId(id);
+  // Convenience function: Same as above, but takes the fid instead.
+  void CallRuntime(Runtime::FunctionId fid,
+                   SaveFPRegsMode save_doubles = kDontSaveFPRegs) {
+    const Runtime::Function* function = Runtime::FunctionForId(fid);
+    CallRuntime(function, function->nargs, save_doubles);
+  }
+
+  void CallRuntimeSaveDoubles(Runtime::FunctionId fid) {
+    const Runtime::Function* function = Runtime::FunctionForId(fid);
     CallRuntime(function, function->nargs, kSaveFPRegs);
   }
 
-  void TailCallRuntime(Runtime::FunctionId fid,
-                       int num_arguments,
-                       int result_size);
+  void TailCallRuntime(Runtime::FunctionId fid);
 
   int ActivationFrameAlignment();
 
@@ -1119,19 +1136,11 @@ class MacroAssembler : public Assembler {
 
   // Jump to a runtime routine.
   void JumpToExternalReference(const ExternalReference& builtin);
-  // Tail call of a runtime routine (jump).
-  // Like JumpToExternalReference, but also takes care of passing the number
-  // of parameters.
-  void TailCallExternalReference(const ExternalReference& ext,
-                                 int num_arguments,
-                                 int result_size);
+
+  // Convenience function: call an external reference.
   void CallExternalReference(const ExternalReference& ext,
                              int num_arguments);
 
-
-  // Invoke specified builtin JavaScript function.
-  void InvokeBuiltin(int native_context_index, InvokeFlag flag,
-                     const CallWrapper& call_wrapper = NullCallWrapper());
 
   void Jump(Register target);
   void Jump(Address target, RelocInfo::Mode rmode, Condition cond = al);
@@ -1331,6 +1340,12 @@ class MacroAssembler : public Assembler {
                           CPURegister heap_number_map = NoReg,
                           MutableMode mode = IMMUTABLE);
 
+  // Allocate and initialize a JSValue wrapper with the specified {constructor}
+  // and {value}.
+  void AllocateJSValue(Register result, Register constructor, Register value,
+                       Register scratch1, Register scratch2,
+                       Label* gc_required);
+
   // ---------------------------------------------------------------------------
   // Support functions.
 
@@ -1466,20 +1481,6 @@ class MacroAssembler : public Assembler {
   // Fall-through if the object was a string and jump on fail otherwise.
   inline void IsObjectNameType(Register object, Register type, Label* fail);
 
-  inline void IsObjectJSObjectType(Register heap_object,
-                                   Register map,
-                                   Register scratch,
-                                   Label* fail);
-
-  // Check the instance type in the given map to see if it corresponds to a
-  // JS object type. Jump to the fail label if this is not the case and fall
-  // through otherwise. However if fail label is NULL, no branch will be
-  // performed and the flag will be updated. You can test the flag for "le"
-  // condition to test if it is a valid JS object type.
-  inline void IsInstanceJSObjectType(Register map,
-                                     Register scratch,
-                                     Label* fail);
-
   // Load and check the instance type of an object for being a string.
   // Loads the type into the second argument register.
   // The object and type arguments can be the same register; in that case it
@@ -1585,12 +1586,8 @@ class MacroAssembler : public Assembler {
   void LeaveFrame(StackFrame::Type type);
 
   // Returns map with validated enum cache in object register.
-  void CheckEnumCache(Register object,
-                      Register null_value,
-                      Register scratch0,
-                      Register scratch1,
-                      Register scratch2,
-                      Register scratch3,
+  void CheckEnumCache(Register object, Register scratch0, Register scratch1,
+                      Register scratch2, Register scratch3, Register scratch4,
                       Label* call_runtime);
 
   // AllocationMemento support. Arrays may have an associated
@@ -1792,6 +1789,11 @@ class MacroAssembler : public Assembler {
                      pointers_to_here_check_for_value);
   }
 
+  // Notify the garbage collector that we wrote a code entry into a
+  // JSFunction. Only scratch is clobbered by the operation.
+  void RecordWriteCodeEntryField(Register js_function, Register code_entry,
+                                 Register scratch);
+
   void RecordWriteForMap(
       Register object,
       Register map,
@@ -1813,23 +1815,10 @@ class MacroAssembler : public Assembler {
       PointersToHereCheck pointers_to_here_check_for_value =
           kPointersToHereMaybeInteresting);
 
-  // Checks the color of an object. If the object is already grey or black
-  // then we just fall through, since it is already live. If it is white and
-  // we can determine that it doesn't need to be scanned, then we just mark it
-  // black and fall through. For the rest we jump to the label so the
-  // incremental marker can fix its assumptions.
-  void EnsureNotWhite(Register object,
-                      Register scratch1,
-                      Register scratch2,
-                      Register scratch3,
-                      Register scratch4,
-                      Label* object_is_white_and_not_data);
-
-  // Detects conservatively whether an object is data-only, i.e. it does need to
-  // be scanned by the garbage collector.
-  void JumpIfDataObject(Register value,
-                        Register scratch,
-                        Label* not_data_object);
+  // Checks the color of an object.  If the object is white we jump to the
+  // incremental marker.
+  void JumpIfWhite(Register value, Register scratch1, Register scratch2,
+                   Register scratch3, Register scratch4, Label* value_is_white);
 
   // Helper for finding the mark bits for an address.
   // Note that the behaviour slightly differs from other architectures.

@@ -59,18 +59,20 @@ Callable CodeFactory::KeyedLoadICInOptimizedCode(
 
 // static
 Callable CodeFactory::CallIC(Isolate* isolate, int argc,
-                             ConvertReceiverMode mode) {
-  return Callable(CallIC::initialize_stub(isolate, argc, mode),
+                             ConvertReceiverMode mode,
+                             TailCallMode tail_call_mode) {
+  return Callable(CallIC::initialize_stub(isolate, argc, mode, tail_call_mode),
                   CallFunctionWithFeedbackDescriptor(isolate));
 }
 
 
 // static
 Callable CodeFactory::CallICInOptimizedCode(Isolate* isolate, int argc,
-                                            ConvertReceiverMode mode) {
-  return Callable(
-      CallIC::initialize_stub_in_optimized_code(isolate, argc, mode),
-      CallFunctionWithFeedbackAndVectorDescriptor(isolate));
+                                            ConvertReceiverMode mode,
+                                            TailCallMode tail_call_mode) {
+  return Callable(CallIC::initialize_stub_in_optimized_code(isolate, argc, mode,
+                                                            tail_call_mode),
+                  CallFunctionWithFeedbackAndVectorDescriptor(isolate));
 }
 
 
@@ -169,6 +171,13 @@ Callable CodeFactory::ToString(Isolate* isolate) {
 
 
 // static
+Callable CodeFactory::ToName(Isolate* isolate) {
+  ToNameStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
 Callable CodeFactory::ToLength(Isolate* isolate) {
   ToLengthStub stub(isolate);
   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
@@ -197,6 +206,13 @@ Callable CodeFactory::RegExpConstructResult(Isolate* isolate) {
 
 
 // static
+Callable CodeFactory::RegExpExec(Isolate* isolate) {
+  RegExpExecStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
 Callable CodeFactory::StringAdd(Isolate* isolate, StringAddFlags flags,
                                 PretenureFlag pretenure_flag) {
   StringAddStub stub(isolate, flags, pretenure_flag);
@@ -207,6 +223,13 @@ Callable CodeFactory::StringAdd(Isolate* isolate, StringAddFlags flags,
 // static
 Callable CodeFactory::StringCompare(Isolate* isolate) {
   StringCompareStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
+Callable CodeFactory::SubString(Isolate* isolate) {
+  SubStringStub stub(isolate);
   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
 }
 
@@ -268,6 +291,13 @@ Callable CodeFactory::ArgumentsAccess(Isolate* isolate,
 
 
 // static
+Callable CodeFactory::RestArgumentsAccess(Isolate* isolate) {
+  RestParamAccessStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
 Callable CodeFactory::AllocateHeapNumber(Isolate* isolate) {
   AllocateHeapNumberStub stub(isolate);
   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
@@ -317,6 +347,13 @@ Callable CodeFactory::Construct(Isolate* isolate) {
 
 
 // static
+Callable CodeFactory::ConstructFunction(Isolate* isolate) {
+  return Callable(isolate->builtins()->ConstructFunction(),
+                  ConstructTrampolineDescriptor(isolate));
+}
+
+
+// static
 Callable CodeFactory::InterpreterPushArgsAndCall(Isolate* isolate) {
   return Callable(isolate->builtins()->InterpreterPushArgsAndCall(),
                   InterpreterPushArgsAndCallDescriptor(isolate));
@@ -331,11 +368,10 @@ Callable CodeFactory::InterpreterPushArgsAndConstruct(Isolate* isolate) {
 
 
 // static
-Callable CodeFactory::InterpreterCEntry(Isolate* isolate) {
-  // TODO(rmcilroy): Deal with runtime functions that return two values.
+Callable CodeFactory::InterpreterCEntry(Isolate* isolate, int result_size) {
   // Note: If we ever use fpregs in the interpreter then we will need to
   // save fpregs too.
-  CEntryStub stub(isolate, 1, kDontSaveFPRegs, kArgvInRegister);
+  CEntryStub stub(isolate, result_size, kDontSaveFPRegs, kArgvInRegister);
   return Callable(stub.GetCode(), InterpreterCEntryDescriptor(isolate));
 }
 

@@ -16,6 +16,7 @@ namespace internal {
 // Give alias names to registers for calling conventions.
 const Register kReturnRegister0 = {Register::kCode_r3};
 const Register kReturnRegister1 = {Register::kCode_r4};
+const Register kReturnRegister2 = {Register::kCode_r5};
 const Register kJSFunctionRegister = {Register::kCode_r4};
 const Register kContextRegister = {Register::kCode_r30};
 const Register kInterpreterAccumulatorRegister = {Register::kCode_r3};
@@ -66,7 +67,8 @@ Register GetRegisterThatIsNotOneOf(Register reg1, Register reg2 = no_reg,
 bool AreAliased(Register reg1, Register reg2, Register reg3 = no_reg,
                 Register reg4 = no_reg, Register reg5 = no_reg,
                 Register reg6 = no_reg, Register reg7 = no_reg,
-                Register reg8 = no_reg);
+                Register reg8 = no_reg, Register reg9 = no_reg,
+                Register reg10 = no_reg);
 #endif
 
 // These exist to provide portability between 32 and 64bit
@@ -145,6 +147,7 @@ class MacroAssembler : public Assembler {
   // Emit code to discard a non-negative number of pointer-sized elements
   // from the stack, clobbering only the sp register.
   void Drop(int count);
+  void Drop(Register count, Register scratch = r0);
 
   void Ret(int drop) {
     Drop(drop);
@@ -215,18 +218,10 @@ class MacroAssembler : public Assembler {
   void JumpIfBlack(Register object, Register scratch0, Register scratch1,
                    Label* on_black);
 
-  // Checks the color of an object.  If the object is already grey or black
-  // then we just fall through, since it is already live.  If it is white and
-  // we can determine that it doesn't need to be scanned, then we just mark it
-  // black and fall through.  For the rest we jump to the label so the
-  // incremental marker can fix its assumptions.
-  void EnsureNotWhite(Register object, Register scratch1, Register scratch2,
-                      Register scratch3, Label* object_is_white_and_not_data);
-
-  // Detects conservatively whether an object is data-only, i.e. it does need to
-  // be scanned by the garbage collector.
-  void JumpIfDataObject(Register value, Register scratch,
-                        Label* not_data_object);
+  // Checks the color of an object.  If the object is white we jump to the
+  // incremental marker.
+  void JumpIfWhite(Register value, Register scratch1, Register scratch2,
+                   Register scratch3, Label* value_is_white);
 
   // Notify the garbage collector that we wrote a pointer into an object.
   // |object| is the object being stored into, |value| is the object being
@@ -254,6 +249,11 @@ class MacroAssembler : public Assembler {
                      lr_status, save_fp, remembered_set_action, smi_check,
                      pointers_to_here_check_for_value);
   }
+
+  // Notify the garbage collector that we wrote a code entry into a
+  // JSFunction. Only scratch is clobbered by the operation.
+  void RecordWriteCodeEntryField(Register js_function, Register code_entry,
+                                 Register scratch);
 
   void RecordWriteForMap(Register object, Register map, Register dst,
                          LinkRegisterStatus lr_status, SaveFPRegsMode save_fp);
@@ -348,6 +348,10 @@ class MacroAssembler : public Assembler {
   void PushFixedFrame(Register marker_reg = no_reg);
   void PopFixedFrame(Register marker_reg = no_reg);
 
+  // Restore caller's frame pointer and return address prior to being
+  // overwritten by tail call stack preparation.
+  void RestoreFrameStateForTailCall();
+
   // Push and pop the registers that can hold pointers, as defined by the
   // RegList constant kSafepointSavedRegisters.
   void PushSafepointRegisters();
@@ -410,8 +414,8 @@ class MacroAssembler : public Assembler {
 #endif
 
   // Generates function and stub prologue code.
-  void StubPrologue(int prologue_offset = 0);
-  void Prologue(bool code_pre_aging, int prologue_offset = 0);
+  void StubPrologue(Register base = no_reg, int prologue_offset = 0);
+  void Prologue(bool code_pre_aging, Register base, int prologue_offset = 0);
 
   // Enter exit frame.
   // stack_space - extra stack space, used for parameters before call to C.
@@ -697,6 +701,12 @@ class MacroAssembler : public Assembler {
                                    Register heap_number_map,
                                    Label* gc_required);
 
+  // Allocate and initialize a JSValue wrapper with the specified {constructor}
+  // and {value}.
+  void AllocateJSValue(Register result, Register constructor, Register value,
+                       Register scratch1, Register scratch2,
+                       Label* gc_required);
+
   // Copies a number of bytes from src to dst. All registers are clobbered. On
   // exit src and dst will point to the place just after where the last byte was
   // read or written and length will be zero.
@@ -859,6 +869,18 @@ class MacroAssembler : public Assembler {
   void TestDoubleIsInt32(DoubleRegister double_input, Register scratch1,
                          Register scratch2, DoubleRegister double_scratch);
 
+  // Check if a double is equal to -0.0.
+  // CR_EQ in cr7 holds the result.
+  void TestDoubleIsMinusZero(DoubleRegister input, Register scratch1,
+                             Register scratch2);
+  void TestHeapNumberIsMinusZero(Register input, Register scratch1,
+                                 Register scratch2);
+
+  // Check the sign of a double.
+  // CR_LT in cr7 holds the result.
+  void TestDoubleSign(DoubleRegister input, Register scratch);
+  void TestHeapNumberSign(Register input, Register scratch);
+
   // Try to convert a double to a signed 32-bit integer.
   // CR_EQ in cr7 is set and result assigned if the conversion is exact.
   void TryDoubleToInt32Exact(Register result, DoubleRegister double_input,
@@ -938,29 +960,29 @@ class MacroAssembler : public Assembler {
   // Call a runtime routine.
   void CallRuntime(const Runtime::Function* f, int num_arguments,
                    SaveFPRegsMode save_doubles = kDontSaveFPRegs);
-  void CallRuntimeSaveDoubles(Runtime::FunctionId id) {
-    const Runtime::Function* function = Runtime::FunctionForId(id);
+  void CallRuntimeSaveDoubles(Runtime::FunctionId fid) {
+    const Runtime::Function* function = Runtime::FunctionForId(fid);
     CallRuntime(function, function->nargs, kSaveFPRegs);
   }
 
   // Convenience function: Same as above, but takes the fid instead.
-  void CallRuntime(Runtime::FunctionId id, int num_arguments,
+  void CallRuntime(Runtime::FunctionId fid,
                    SaveFPRegsMode save_doubles = kDontSaveFPRegs) {
-    CallRuntime(Runtime::FunctionForId(id), num_arguments, save_doubles);
+    const Runtime::Function* function = Runtime::FunctionForId(fid);
+    CallRuntime(function, function->nargs, save_doubles);
+  }
+
+  // Convenience function: Same as above, but takes the fid instead.
+  void CallRuntime(Runtime::FunctionId fid, int num_arguments,
+                   SaveFPRegsMode save_doubles = kDontSaveFPRegs) {
+    CallRuntime(Runtime::FunctionForId(fid), num_arguments, save_doubles);
   }
 
   // Convenience function: call an external reference.
   void CallExternalReference(const ExternalReference& ext, int num_arguments);
 
-  // Tail call of a runtime routine (jump).
-  // Like JumpToExternalReference, but also takes care of passing the number
-  // of parameters.
-  void TailCallExternalReference(const ExternalReference& ext,
-                                 int num_arguments, int result_size);
-
   // Convenience function: tail call a runtime routine (jump).
-  void TailCallRuntime(Runtime::FunctionId fid, int num_arguments,
-                       int result_size);
+  void TailCallRuntime(Runtime::FunctionId fid);
 
   int CalculateStackPassedWords(int num_reg_arguments,
                                 int num_double_arguments);
@@ -1004,10 +1026,6 @@ class MacroAssembler : public Assembler {
 
   // Jump to a runtime routine.
   void JumpToExternalReference(const ExternalReference& builtin);
-
-  // Invoke specified builtin JavaScript function.
-  void InvokeBuiltin(int native_context_index, InvokeFlag flag,
-                     const CallWrapper& call_wrapper = NullCallWrapper());
 
   Handle<Object> CodeObject() {
     DCHECK(!code_object_.is_null());
@@ -1329,6 +1347,10 @@ class MacroAssembler : public Assembler {
 
   void AssertFunction(Register object);
 
+  // Abort execution if argument is not a JSBoundFunction,
+  // enabled via --debug-code.
+  void AssertBoundFunction(Register object);
+
   // Abort execution if argument is not undefined or an AllocationSite, enabled
   // via --debug-code.
   void AssertUndefinedOrAllocationSite(Register object, Register scratch);
@@ -1443,9 +1465,9 @@ class MacroAssembler : public Assembler {
   // Returns the pc offset at which the frame ends.
   int LeaveFrame(StackFrame::Type type, int stack_adjustment = 0);
 
-  // Expects object in r0 and returns map with validated enum cache
-  // in r0.  Assumes that any other register can be used as a scratch.
-  void CheckEnumCache(Register null_value, Label* call_runtime);
+  // Expects object in r3 and returns map with validated enum cache
+  // in r3.  Assumes that any other register can be used as a scratch.
+  void CheckEnumCache(Label* call_runtime);
 
   // AllocationMemento support. Arrays may have an associated
   // AllocationMemento object that can be checked for in order to pretransition

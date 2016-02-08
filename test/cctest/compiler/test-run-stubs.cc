@@ -2,9 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(jochen): Remove this after the setting is turned on globally.
-#define V8_IMMINENT_DEPRECATION_WARNINGS
-
 #include "src/bootstrapper.h"
 #include "src/code-stubs.h"
 #include "src/compiler/common-operator.h"
@@ -30,8 +27,13 @@ TEST(RunStringLengthStub) {
   // Create code and an accompanying descriptor.
   StringLengthStub stub(isolate);
   Handle<Code> code = stub.GenerateCode();
-  CompilationInfo info(&stub, isolate, zone);
-  CallDescriptor* descriptor = Linkage::ComputeIncoming(zone, &info);
+  CompilationInfo info("test", isolate, zone,
+                       Code::ComputeFlags(Code::HANDLER));
+  CallInterfaceDescriptor interface_descriptor =
+      stub.GetCallInterfaceDescriptor();
+  CallDescriptor* descriptor = Linkage::GetStubCallDescriptor(
+      isolate, zone, interface_descriptor, stub.GetStackParameterCount(),
+      CallDescriptor::kNoFlags, Operator::kNoProperties);
 
   // Create a function to call the code using the descriptor.
   Graph graph(zone);

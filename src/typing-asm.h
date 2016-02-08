@@ -22,8 +22,43 @@ class AsmTyper : public AstVisitor {
   explicit AsmTyper(Isolate* isolate, Zone* zone, Script* script,
                     FunctionLiteral* root);
   bool Validate();
-  void set_allow_simd(bool simd);
+  void set_allow_simd(bool simd) { allow_simd_ = simd; }
   const char* error_message() { return error_message_; }
+
+  enum StandardMember {
+    kNone = 0,
+    kStdlib,
+    kInfinity,
+    kNaN,
+    kMathAcos,
+    kMathAsin,
+    kMathAtan,
+    kMathCos,
+    kMathSin,
+    kMathTan,
+    kMathExp,
+    kMathLog,
+    kMathCeil,
+    kMathFloor,
+    kMathSqrt,
+    kMathAbs,
+    kMathMin,
+    kMathMax,
+    kMathAtan2,
+    kMathPow,
+    kMathImul,
+    kMathFround,
+    kMathE,
+    kMathLN10,
+    kMathLN2,
+    kMathLOG2E,
+    kMathLOG10E,
+    kMathPI,
+    kMathSQRT1_2,
+    kMathSQRT2,
+  };
+
+  StandardMember VariableAsStandardMember(Variable* variable);
 
   DEFINE_AST_VISITOR_SUBCLASS_MEMBERS();
 
@@ -37,17 +72,20 @@ class AsmTyper : public AstVisitor {
 
   struct VariableInfo : public ZoneObject {
     Type* type;
-    bool is_stdlib_object;
     bool is_check_function;
     bool is_constructor_function;
+    StandardMember standard_member;
 
     VariableInfo()
         : type(NULL),
-          is_stdlib_object(false),
           is_check_function(false),
-          is_constructor_function(false) {}
+          is_constructor_function(false),
+          standard_member(kNone) {}
     explicit VariableInfo(Type* t)
-        : type(t), is_check_function(false), is_constructor_function(false) {}
+        : type(t),
+          is_check_function(false),
+          is_constructor_function(false),
+          standard_member(kNone) {}
   };
 
   // Information for bi-directional typing with a cap on nesting depth.
@@ -75,6 +113,7 @@ class AsmTyper : public AstVisitor {
 
   bool in_function_;  // In module function?
   bool building_function_tables_;
+  bool visiting_exports_;
 
   TypeCache const& cache_;
 
@@ -122,6 +161,8 @@ class AsmTyper : public AstVisitor {
                             const char* msg);
 
   void VisitLiteral(Literal* expr, bool is_return);
+
+  void VisitVariableProxy(VariableProxy* expr, bool assignment);
 
   void VisitIntegerBitwiseOperator(BinaryOperation* expr, Type* left_expected,
                                    Type* right_expected, Type* result_type,

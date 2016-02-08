@@ -487,18 +487,16 @@ void MathPowStub::Generate(MacroAssembler* masm) {
   __ Cvtlsi2sd(double_exponent, exponent);
 
   // Returning or bailing out.
-  Counters* counters = isolate()->counters();
   if (exponent_type() == ON_STACK) {
     // The arguments are still on the stack.
     __ bind(&call_runtime);
-    __ TailCallRuntime(Runtime::kMathPowRT, 2, 1);
+    __ TailCallRuntime(Runtime::kMathPowRT);
 
     // The stub is called from non-optimized code, which expects the result
     // as heap number in rax.
     __ bind(&done);
     __ AllocateHeapNumber(rax, rcx, &call_runtime);
     __ Movsd(FieldOperand(rax, HeapNumber::kValueOffset), double_result);
-    __ IncrementCounter(counters->math_pow(), 1);
     __ ret(2 * kPointerSize);
   } else {
     __ bind(&call_runtime);
@@ -515,7 +513,6 @@ void MathPowStub::Generate(MacroAssembler* masm) {
     __ Movsd(double_result, xmm0);
 
     __ bind(&done);
-    __ IncrementCounter(counters->math_pow(), 1);
     __ ret(0);
   }
 }
@@ -591,7 +588,7 @@ void ArgumentsAccessStub::GenerateReadElement(MacroAssembler* masm) {
   __ PopReturnAddressTo(rbx);
   __ Push(rdx);
   __ PushReturnAddressFrom(rbx);
-  __ TailCallRuntime(Runtime::kArguments, 1, 1);
+  __ TailCallRuntime(Runtime::kArguments);
 }
 
 
@@ -803,7 +800,7 @@ void ArgumentsAccessStub::GenerateNewSloppyFast(MacroAssembler* masm) {
   __ Push(rdx);  // Push parameters pointer.
   __ Push(r11);  // Push parameter count.
   __ PushReturnAddressFrom(rax);
-  __ TailCallRuntime(Runtime::kNewSloppyArguments, 3, 1);
+  __ TailCallRuntime(Runtime::kNewSloppyArguments);
 }
 
 
@@ -837,7 +834,37 @@ void ArgumentsAccessStub::GenerateNewSloppySlow(MacroAssembler* masm) {
   __ Push(rdx);  // Push parameters pointer.
   __ Push(rcx);  // Push parameter count.
   __ PushReturnAddressFrom(rax);
-  __ TailCallRuntime(Runtime::kNewSloppyArguments, 3, 1);
+  __ TailCallRuntime(Runtime::kNewSloppyArguments);
+}
+
+
+void RestParamAccessStub::GenerateNew(MacroAssembler* masm) {
+  // rcx : number of parameters (tagged)
+  // rdx : parameters pointer
+  // rbx : rest parameter index (tagged)
+  // rsp[0] : return address
+
+  // Check if the calling frame is an arguments adaptor frame.
+  Label runtime;
+  __ movp(r8, Operand(rbp, StandardFrameConstants::kCallerFPOffset));
+  __ movp(rax, Operand(r8, StandardFrameConstants::kContextOffset));
+  __ Cmp(rax, Smi::FromInt(StackFrame::ARGUMENTS_ADAPTOR));
+  __ j(not_equal, &runtime);
+
+  // Patch the arguments.length and the parameters pointer.
+  StackArgumentsAccessor args(rsp, 4, ARGUMENTS_DONT_CONTAIN_RECEIVER);
+  __ movp(rcx, Operand(r8, ArgumentsAdaptorFrameConstants::kLengthOffset));
+  __ SmiToInteger64(rax, rcx);
+  __ leap(rdx, Operand(r8, rax, times_pointer_size,
+                       StandardFrameConstants::kCallerSPOffset));
+
+  __ bind(&runtime);
+  __ PopReturnAddressTo(rax);
+  __ Push(rcx);  // Push number of parameters.
+  __ Push(rdx);  // Push parameters pointer.
+  __ Push(rbx);  // Push rest parameter index.
+  __ PushReturnAddressFrom(rax);
+  __ TailCallRuntime(Runtime::kNewRestParam);
 }
 
 
@@ -861,7 +888,7 @@ void LoadIndexedInterceptorStub::Generate(MacroAssembler* masm) {
   __ PushReturnAddressFrom(scratch);
 
   // Perform tail call to the entry.
-  __ TailCallRuntime(Runtime::kLoadElementWithInterceptor, 2, 1);
+  __ TailCallRuntime(Runtime::kLoadElementWithInterceptor);
 
   __ bind(&slow);
   PropertyAccessCompiler::TailCallBuiltin(
@@ -995,7 +1022,7 @@ void ArgumentsAccessStub::GenerateNewStrict(MacroAssembler* masm) {
   __ Push(rdx);  // Push parameters pointer.
   __ Push(rcx);  // Push parameter count.
   __ PushReturnAddressFrom(rax);
-  __ TailCallRuntime(Runtime::kNewStrictArguments, 3, 1);
+  __ TailCallRuntime(Runtime::kNewStrictArguments);
 }
 
 
@@ -1004,7 +1031,7 @@ void RegExpExecStub::Generate(MacroAssembler* masm) {
   // time or if regexp entry in generated code is turned off runtime switch or
   // at compilation.
 #ifdef V8_INTERPRETED_REGEXP
-  __ TailCallRuntime(Runtime::kRegExpExec, 4, 1);
+  __ TailCallRuntime(Runtime::kRegExpExec);
 #else  // V8_INTERPRETED_REGEXP
 
   // Stack frame on entry.
@@ -1387,11 +1414,11 @@ void RegExpExecStub::Generate(MacroAssembler* masm) {
   __ j(equal, &runtime);
 
   // For exception, throw the exception again.
-  __ TailCallRuntime(Runtime::kRegExpExecReThrow, 4, 1);
+  __ TailCallRuntime(Runtime::kRegExpExecReThrow);
 
   // Do the runtime call to execute the regexp.
   __ bind(&runtime);
-  __ TailCallRuntime(Runtime::kRegExpExec, 4, 1);
+  __ TailCallRuntime(Runtime::kRegExpExec);
 
   // Deferred code for string handling.
   // (7) Not a long external string?  If yes, go to (10).
@@ -1735,14 +1762,12 @@ void CompareICStub::GenerateGeneric(MacroAssembler* masm) {
   // Figure out which native to call and setup the arguments.
   if (cc == equal) {
     __ PushReturnAddressFrom(rcx);
-    __ TailCallRuntime(strict() ? Runtime::kStrictEquals : Runtime::kEquals, 2,
-                       1);
+    __ TailCallRuntime(strict() ? Runtime::kStrictEquals : Runtime::kEquals);
   } else {
     __ Push(Smi::FromInt(NegativeComparisonResult(cc)));
     __ PushReturnAddressFrom(rcx);
-    __ TailCallRuntime(
-        is_strong(strength()) ? Runtime::kCompare_Strong : Runtime::kCompare, 3,
-        1);
+    __ TailCallRuntime(is_strong(strength()) ? Runtime::kCompare_Strong
+                                             : Runtime::kCompare);
   }
 
   __ bind(&miss);
@@ -1936,10 +1961,6 @@ void CallICStub::Generate(MacroAssembler* masm) {
   // -- rbx - vector
   // -----------------------------------
   Isolate* isolate = masm->isolate();
-  const int with_types_offset =
-      FixedArray::OffsetOfElementAt(TypeFeedbackVector::kWithTypesIndex);
-  const int generic_offset =
-      FixedArray::OffsetOfElementAt(TypeFeedbackVector::kGenericCountIndex);
   Label extra_checks_or_miss, call, call_function;
   int argc = arg_count();
   StackArgumentsAccessor args(rsp, argc);
@@ -1978,7 +1999,8 @@ void CallICStub::Generate(MacroAssembler* masm) {
 
   __ bind(&call_function);
   __ Set(rax, argc);
-  __ Jump(masm->isolate()->builtins()->CallFunction(convert_mode()),
+  __ Jump(masm->isolate()->builtins()->CallFunction(convert_mode(),
+                                                    tail_call_mode()),
           RelocInfo::CODE_TARGET);
 
   __ bind(&extra_checks_or_miss);
@@ -2013,13 +2035,10 @@ void CallICStub::Generate(MacroAssembler* masm) {
   __ j(not_equal, &miss);
   __ Move(FieldOperand(rbx, rdx, times_pointer_size, FixedArray::kHeaderSize),
           TypeFeedbackVector::MegamorphicSentinel(isolate));
-  // We have to update statistics for runtime profiling.
-  __ SmiAddConstant(FieldOperand(rbx, with_types_offset), Smi::FromInt(-1));
-  __ SmiAddConstant(FieldOperand(rbx, generic_offset), Smi::FromInt(1));
 
   __ bind(&call);
   __ Set(rax, argc);
-  __ Jump(masm->isolate()->builtins()->Call(convert_mode()),
+  __ Jump(masm->isolate()->builtins()->Call(convert_mode(), tail_call_mode()),
           RelocInfo::CODE_TARGET);
 
   __ bind(&uninitialized);
@@ -2042,9 +2061,6 @@ void CallICStub::Generate(MacroAssembler* masm) {
   __ movp(rcx, ContextOperand(rcx, Context::NATIVE_CONTEXT_INDEX));
   __ cmpp(rcx, NativeContextOperand());
   __ j(not_equal, &miss);
-
-  // Update stats.
-  __ SmiAddConstant(FieldOperand(rbx, with_types_offset), Smi::FromInt(1));
 
   // Initialize the call counter.
   __ Move(FieldOperand(rbx, rdx, times_pointer_size,
@@ -2089,7 +2105,7 @@ void CallICStub::GenerateMiss(MacroAssembler* masm) {
   __ Push(rdx);
 
   // Call the entry.
-  __ CallRuntime(Runtime::kCallIC_Miss, 3);
+  __ CallRuntime(Runtime::kCallIC_Miss);
 
   // Move result to edi and exit the internal frame.
   __ movp(rdi, rax);
@@ -2140,12 +2156,34 @@ void CEntryStub::Generate(MacroAssembler* masm) {
 
   ProfileEntryHookStub::MaybeCallEntryHook(masm);
 
-  // Enter the exit frame that transitions from JavaScript to C++.
 #ifdef _WIN64
-  int arg_stack_space = (result_size() < 2 ? 2 : 4);
-#else   // _WIN64
-  int arg_stack_space = 0;
+  // Windows 64-bit ABI passes arguments in rcx, rdx, r8, r9. It requires the
+  // stack to be aligned to 16 bytes. It only allows a single-word to be
+  // returned in register rax. Larger return sizes must be written to an address
+  // passed as a hidden first argument.
+  const Register kCCallArg0 = rcx;
+  const Register kCCallArg1 = rdx;
+  const Register kCCallArg2 = r8;
+  const Register kCCallArg3 = r9;
+  const int kArgExtraStackSpace = 2;
+  const int kMaxRegisterResultSize = 1;
+#else
+  // GCC / Clang passes arguments in rdi, rsi, rdx, rcx, r8, r9. Simple results
+  // are returned in rax, and a struct of two pointers are returned in rax+rdx.
+  // Larger return sizes must be written to an address passed as a hidden first
+  // argument.
+  const Register kCCallArg0 = rdi;
+  const Register kCCallArg1 = rsi;
+  const Register kCCallArg2 = rdx;
+  const Register kCCallArg3 = rcx;
+  const int kArgExtraStackSpace = 0;
+  const int kMaxRegisterResultSize = 2;
 #endif  // _WIN64
+
+  // Enter the exit frame that transitions from JavaScript to C++.
+  int arg_stack_space =
+      kArgExtraStackSpace +
+      (result_size() <= kMaxRegisterResultSize ? 0 : result_size());
   if (argv_in_register()) {
     DCHECK(!save_doubles());
     __ EnterApiExitFrame(arg_stack_space);
@@ -2161,56 +2199,41 @@ void CEntryStub::Generate(MacroAssembler* masm) {
   // r14: number of arguments including receiver (C callee-saved).
   // r15: argv pointer (C callee-saved).
 
-  // Simple results returned in rax (both AMD64 and Win64 calling conventions).
-  // Complex results must be written to address passed as first argument.
-  // AMD64 calling convention: a struct of two pointers in rax+rdx
-
   // Check stack alignment.
   if (FLAG_debug_code) {
     __ CheckStackAlignment();
   }
 
-  // Call C function.
-#ifdef _WIN64
-  // Windows 64-bit ABI passes arguments in rcx, rdx, r8, r9.
-  // Pass argv and argc as two parameters. The arguments object will
-  // be created by stubs declared by DECLARE_RUNTIME_FUNCTION().
-  if (result_size() < 2) {
+  // Call C function. The arguments object will be created by stubs declared by
+  // DECLARE_RUNTIME_FUNCTION().
+  if (result_size() <= kMaxRegisterResultSize) {
     // Pass a pointer to the Arguments object as the first argument.
-    // Return result in single register (rax).
-    __ movp(rcx, r14);  // argc.
-    __ movp(rdx, r15);  // argv.
-    __ Move(r8, ExternalReference::isolate_address(isolate()));
+    // Return result in single register (rax), or a register pair (rax, rdx).
+    __ movp(kCCallArg0, r14);  // argc.
+    __ movp(kCCallArg1, r15);  // argv.
+    __ Move(kCCallArg2, ExternalReference::isolate_address(isolate()));
   } else {
-    DCHECK_EQ(2, result_size());
+    DCHECK_LE(result_size(), 3);
     // Pass a pointer to the result location as the first argument.
-    __ leap(rcx, StackSpaceOperand(2));
+    __ leap(kCCallArg0, StackSpaceOperand(kArgExtraStackSpace));
     // Pass a pointer to the Arguments object as the second argument.
-    __ movp(rdx, r14);  // argc.
-    __ movp(r8, r15);   // argv.
-    __ Move(r9, ExternalReference::isolate_address(isolate()));
+    __ movp(kCCallArg1, r14);  // argc.
+    __ movp(kCCallArg2, r15);  // argv.
+    __ Move(kCCallArg3, ExternalReference::isolate_address(isolate()));
   }
-
-#else  // _WIN64
-  // GCC passes arguments in rdi, rsi, rdx, rcx, r8, r9.
-  __ movp(rdi, r14);  // argc.
-  __ movp(rsi, r15);  // argv.
-  __ Move(rdx, ExternalReference::isolate_address(isolate()));
-#endif  // _WIN64
   __ call(rbx);
-  // Result is in rax - do not destroy this register!
 
-#ifdef _WIN64
-  // If return value is on the stack, pop it to registers.
-  if (result_size() > 1) {
-    DCHECK_EQ(2, result_size());
+  if (result_size() > kMaxRegisterResultSize) {
     // Read result values stored on stack. Result is stored
-    // above the four argument mirror slots and the two
-    // Arguments object slots.
-    __ movq(rax, Operand(rsp, 6 * kRegisterSize));
-    __ movq(rdx, Operand(rsp, 7 * kRegisterSize));
+    // above the the two Arguments object slots on Win64.
+    DCHECK_LE(result_size(), 3);
+    __ movq(kReturnRegister0, StackSpaceOperand(kArgExtraStackSpace + 0));
+    __ movq(kReturnRegister1, StackSpaceOperand(kArgExtraStackSpace + 1));
+    if (result_size() > 2) {
+      __ movq(kReturnRegister2, StackSpaceOperand(kArgExtraStackSpace + 2));
+    }
   }
-#endif  // _WIN64
+  // Result is in rax, rdx:rax or r8:rdx:rax - do not destroy these registers!
 
   // Check result for exception sentinel.
   Label exception_returned;
@@ -2493,15 +2516,6 @@ void InstanceOfStub::Generate(MacroAssembler* masm) {
            Immediate(1 << Map::kHasNonInstancePrototype));
   __ j(not_zero, &slow_case);
 
-  // Ensure that {function} is not bound.
-  Register const shared_info = kScratchRegister;
-  __ movp(shared_info,
-          FieldOperand(function, JSFunction::kSharedFunctionInfoOffset));
-  __ TestBitSharedFunctionInfoSpecialField(
-      shared_info, SharedFunctionInfo::kCompilerHintsOffset,
-      SharedFunctionInfo::kBoundFunction);
-  __ j(not_zero, &slow_case);
-
   // Get the "prototype" (or initial map) of the {function}.
   __ movp(function_prototype,
           FieldOperand(function, JSFunction::kPrototypeOrInitialMapOffset));
@@ -2527,11 +2541,16 @@ void InstanceOfStub::Generate(MacroAssembler* masm) {
 
   // Loop through the prototype chain looking for the {function} prototype.
   // Assume true, and change to false if not found.
-  Label done, loop, proxy_case;
+  Label done, loop, fast_runtime_fallback;
   __ LoadRoot(rax, Heap::kTrueValueRootIndex);
   __ bind(&loop);
+
+  __ testb(FieldOperand(object_map, Map::kBitFieldOffset),
+           Immediate(1 << Map::kIsAccessCheckNeeded));
+  __ j(not_zero, &fast_runtime_fallback, Label::kNear);
   __ CmpInstanceType(object_map, JS_PROXY_TYPE);
-  __ j(equal, &proxy_case, Label::kNear);
+  __ j(equal, &fast_runtime_fallback, Label::kNear);
+
   __ movp(object, FieldOperand(object_map, Map::kPrototypeOffset));
   __ cmpp(object, function_prototype);
   __ j(equal, &done, Label::kNear);
@@ -2543,8 +2562,8 @@ void InstanceOfStub::Generate(MacroAssembler* masm) {
   __ StoreRoot(rax, Heap::kInstanceofCacheAnswerRootIndex);
   __ ret(0);
 
-  // Proxy-case: Call the %HasInPrototypeChain runtime function.
-  __ bind(&proxy_case);
+  // Found Proxy or access check needed: Call the runtime.
+  __ bind(&fast_runtime_fallback);
   __ PopReturnAddressTo(kScratchRegister);
   __ Push(object);
   __ Push(function_prototype);
@@ -2552,7 +2571,7 @@ void InstanceOfStub::Generate(MacroAssembler* masm) {
   // Invalidate the instanceof cache.
   __ Move(rax, Smi::FromInt(0));
   __ StoreRoot(rax, Heap::kInstanceofCacheFunctionRootIndex);
-  __ TailCallRuntime(Runtime::kHasInPrototypeChain, 2, 1);
+  __ TailCallRuntime(Runtime::kHasInPrototypeChain);
 
   // Slow-case: Call the %InstanceOf runtime function.
   __ bind(&slow_case);
@@ -2560,7 +2579,7 @@ void InstanceOfStub::Generate(MacroAssembler* masm) {
   __ Push(object);
   __ Push(function);
   __ PushReturnAddressFrom(kScratchRegister);
-  __ TailCallRuntime(Runtime::kInstanceOf, 2, 1);
+  __ TailCallRuntime(Runtime::kInstanceOf);
 }
 
 
@@ -2619,11 +2638,11 @@ void StringCharCodeAtGenerator::GenerateSlow(
   __ Push(object_);
   __ Push(index_);  // Consumed by runtime conversion function.
   if (index_flags_ == STRING_INDEX_IS_NUMBER) {
-    __ CallRuntime(Runtime::kNumberToIntegerMapMinusZero, 1);
+    __ CallRuntime(Runtime::kNumberToIntegerMapMinusZero);
   } else {
     DCHECK(index_flags_ == STRING_INDEX_IS_ARRAY_INDEX);
     // NumberToSmi discards numbers that are not exact integers.
-    __ CallRuntime(Runtime::kNumberToSmi, 1);
+    __ CallRuntime(Runtime::kNumberToSmi);
   }
   if (!index_.is(rax)) {
     // Save the conversion result before the pop instructions below
@@ -2652,7 +2671,7 @@ void StringCharCodeAtGenerator::GenerateSlow(
   __ Push(object_);
   __ Integer32ToSmi(index_, index_);
   __ Push(index_);
-  __ CallRuntime(Runtime::kStringCharCodeAtRT, 2);
+  __ CallRuntime(Runtime::kStringCharCodeAtRT);
   if (!result_.is(rax)) {
     __ movp(result_, rax);
   }
@@ -2690,7 +2709,7 @@ void StringCharFromCodeGenerator::GenerateSlow(
   __ bind(&slow_case_);
   call_helper.BeforeCall(masm);
   __ Push(code_);
-  __ CallRuntime(Runtime::kStringCharFromCode, 1);
+  __ CallRuntime(Runtime::kStringCharFromCode);
   if (!result_.is(rax)) {
     __ movp(result_, rax);
   }
@@ -2937,7 +2956,7 @@ void SubStringStub::Generate(MacroAssembler* masm) {
 
   // Just jump to runtime to create the sub string.
   __ bind(&runtime);
-  __ TailCallRuntime(Runtime::kSubString, 3, 1);
+  __ TailCallRuntime(Runtime::kSubString);
 
   __ bind(&single_char);
   // rax: string
@@ -2983,7 +3002,7 @@ void ToNumberStub::Generate(MacroAssembler* masm) {
   __ PopReturnAddressTo(rcx);     // Pop return address.
   __ Push(rax);                   // Push argument.
   __ PushReturnAddressFrom(rcx);  // Push return address.
-  __ TailCallRuntime(Runtime::kStringToNumber, 1, 1);
+  __ TailCallRuntime(Runtime::kStringToNumber);
   __ bind(&not_string);
 
   Label not_oddball;
@@ -2996,7 +3015,7 @@ void ToNumberStub::Generate(MacroAssembler* masm) {
   __ PopReturnAddressTo(rcx);     // Pop return address.
   __ Push(rax);                   // Push argument.
   __ PushReturnAddressFrom(rcx);  // Push return address.
-  __ TailCallRuntime(Runtime::kToNumber, 1, 1);
+  __ TailCallRuntime(Runtime::kToNumber);
 }
 
 
@@ -3015,7 +3034,7 @@ void ToLengthStub::Generate(MacroAssembler* masm) {
   __ PopReturnAddressTo(rcx);     // Pop return address.
   __ Push(rax);                   // Push argument.
   __ PushReturnAddressFrom(rcx);  // Push return address.
-  __ TailCallRuntime(Runtime::kToLength, 1, 1);
+  __ TailCallRuntime(Runtime::kToLength);
 }
 
 
@@ -3050,7 +3069,43 @@ void ToStringStub::Generate(MacroAssembler* masm) {
   __ PopReturnAddressTo(rcx);     // Pop return address.
   __ Push(rax);                   // Push argument.
   __ PushReturnAddressFrom(rcx);  // Push return address.
-  __ TailCallRuntime(Runtime::kToString, 1, 1);
+  __ TailCallRuntime(Runtime::kToString);
+}
+
+
+void ToNameStub::Generate(MacroAssembler* masm) {
+  // The ToName stub takes one argument in rax.
+  Label is_number;
+  __ JumpIfSmi(rax, &is_number, Label::kNear);
+
+  Label not_name;
+  STATIC_ASSERT(FIRST_NAME_TYPE == FIRST_TYPE);
+  __ CmpObjectType(rax, LAST_NAME_TYPE, rdi);
+  // rax: receiver
+  // rdi: receiver map
+  __ j(above, &not_name, Label::kNear);
+  __ Ret();
+  __ bind(&not_name);
+
+  Label not_heap_number;
+  __ CompareRoot(rdi, Heap::kHeapNumberMapRootIndex);
+  __ j(not_equal, &not_heap_number, Label::kNear);
+  __ bind(&is_number);
+  NumberToStringStub stub(isolate());
+  __ TailCallStub(&stub);
+  __ bind(&not_heap_number);
+
+  Label not_oddball;
+  __ CmpInstanceType(rdi, ODDBALL_TYPE);
+  __ j(not_equal, &not_oddball, Label::kNear);
+  __ movp(rax, FieldOperand(rax, Oddball::kToStringOffset));
+  __ Ret();
+  __ bind(&not_oddball);
+
+  __ PopReturnAddressTo(rcx);     // Pop return address.
+  __ Push(rax);                   // Push argument.
+  __ PushReturnAddressFrom(rcx);  // Push return address.
+  __ TailCallRuntime(Runtime::kToName);
 }
 
 
@@ -3225,7 +3280,7 @@ void StringCompareStub::Generate(MacroAssembler* masm) {
   __ Push(rdx);
   __ Push(rax);
   __ PushReturnAddressFrom(rcx);
-  __ TailCallRuntime(Runtime::kStringCompare, 2, 1);
+  __ TailCallRuntime(Runtime::kStringCompare);
 }
 
 
@@ -3270,14 +3325,16 @@ void CompareICStub::GenerateBooleans(MacroAssembler* masm) {
   __ JumpIfNotRoot(rcx, Heap::kBooleanMapRootIndex, &miss, miss_distance);
   __ JumpIfNotRoot(rbx, Heap::kBooleanMapRootIndex, &miss, miss_distance);
   if (op() != Token::EQ_STRICT && is_strong(strength())) {
-    __ TailCallRuntime(Runtime::kThrowStrongModeImplicitConversion, 0, 1);
+    __ TailCallRuntime(Runtime::kThrowStrongModeImplicitConversion);
   } else {
     if (!Token::IsEqualityOp(op())) {
       __ movp(rax, FieldOperand(rax, Oddball::kToNumberOffset));
       __ AssertSmi(rax);
       __ movp(rdx, FieldOperand(rdx, Oddball::kToNumberOffset));
       __ AssertSmi(rdx);
-      __ xchgp(rax, rdx);
+      __ pushq(rax);
+      __ movq(rax, rdx);
+      __ popq(rdx);
     }
     __ subp(rax, rdx);
     __ Ret();
@@ -3552,9 +3609,9 @@ void CompareICStub::GenerateStrings(MacroAssembler* masm) {
   __ Push(right);
   __ PushReturnAddressFrom(tmp1);
   if (equality) {
-    __ TailCallRuntime(Runtime::kStringEquals, 2, 1);
+    __ TailCallRuntime(Runtime::kStringEquals);
   } else {
-    __ TailCallRuntime(Runtime::kStringCompare, 2, 1);
+    __ TailCallRuntime(Runtime::kStringCompare);
   }
 
   __ bind(&miss);
@@ -3599,14 +3656,14 @@ void CompareICStub::GenerateKnownReceivers(MacroAssembler* masm) {
     __ subp(rax, rdx);
     __ ret(0);
   } else if (is_strong(strength())) {
-    __ TailCallRuntime(Runtime::kThrowStrongModeImplicitConversion, 0, 1);
+    __ TailCallRuntime(Runtime::kThrowStrongModeImplicitConversion);
   } else {
     __ PopReturnAddressTo(rcx);
     __ Push(rdx);
     __ Push(rax);
     __ Push(Smi::FromInt(NegativeComparisonResult(GetCondition())));
     __ PushReturnAddressFrom(rcx);
-    __ TailCallRuntime(Runtime::kCompare, 3, 1);
+    __ TailCallRuntime(Runtime::kCompare);
   }
 
   __ bind(&miss);
@@ -3623,7 +3680,7 @@ void CompareICStub::GenerateMiss(MacroAssembler* masm) {
     __ Push(rdx);
     __ Push(rax);
     __ Push(Smi::FromInt(op()));
-    __ CallRuntime(Runtime::kCompareIC_Miss, 3);
+    __ CallRuntime(Runtime::kCompareIC_Miss);
 
     // Compute the entry point of the rewritten stub.
     __ leap(rdi, FieldOperand(rax, Code::kHeaderSize));
@@ -4008,11 +4065,10 @@ void RecordWriteStub::CheckNeedsToInformIncrementalMarker(
   // We need an extra register for this, so we push the object register
   // temporarily.
   __ Push(regs_.object());
-  __ EnsureNotWhite(regs_.scratch0(),  // The value.
-                    regs_.scratch1(),  // Scratch.
-                    regs_.object(),  // Scratch.
-                    &need_incremental_pop_object,
-                    Label::kNear);
+  __ JumpIfWhite(regs_.scratch0(),  // The value.
+                 regs_.scratch1(),  // Scratch.
+                 regs_.object(),    // Scratch.
+                 &need_incremental_pop_object, Label::kNear);
   __ Pop(regs_.object());
 
   regs_.Restore(masm);
@@ -4760,8 +4816,7 @@ void ArrayConstructorStub::Generate(MacroAssembler* masm) {
   __ Push(rdx);
   __ Push(rbx);
   __ PushReturnAddressFrom(rcx);
-  __ JumpToExternalReference(ExternalReference(Runtime::kNewArray, isolate()),
-                             1);
+  __ JumpToExternalReference(ExternalReference(Runtime::kNewArray, isolate()));
 }
 
 
@@ -4880,7 +4935,7 @@ void LoadGlobalViaContextStub::Generate(MacroAssembler* masm) {
   __ PopReturnAddressTo(kScratchRegister);
   __ Push(slot_reg);
   __ Push(kScratchRegister);
-  __ TailCallRuntime(Runtime::kLoadGlobalViaContext, 1, 1);
+  __ TailCallRuntime(Runtime::kLoadGlobalViaContext);
 }
 
 
@@ -5003,8 +5058,7 @@ void StoreGlobalViaContextStub::Generate(MacroAssembler* masm) {
   __ Push(kScratchRegister);
   __ TailCallRuntime(is_strict(language_mode())
                          ? Runtime::kStoreGlobalViaContext_Strict
-                         : Runtime::kStoreGlobalViaContext_Sloppy,
-                     2, 1);
+                         : Runtime::kStoreGlobalViaContext_Sloppy);
 }
 
 
@@ -5178,7 +5232,7 @@ static void CallApiFunctionAndReturn(MacroAssembler* masm,
 
   // Re-throw by promoting a scheduled exception.
   __ bind(&promote_scheduled_exception);
-  __ TailCallRuntime(Runtime::kPromoteScheduledException, 0, 1);
+  __ TailCallRuntime(Runtime::kPromoteScheduledException);
 
   // HandleScope limit has changed. Delete allocated extensions.
   __ bind(&delete_allocated_handles);
@@ -5348,11 +5402,11 @@ void CallApiAccessorStub::Generate(MacroAssembler* masm) {
 
 void CallApiGetterStub::Generate(MacroAssembler* masm) {
   // ----------- S t a t e -------------
-  //  -- rsp[0]                  : return address
-  //  -- rsp[8]                  : name
-  //  -- rsp[16 - kArgsLength*8] : PropertyCallbackArguments object
+  //  -- rsp[0]                          : return address
+  //  -- rsp[8]                          : name
+  //  -- rsp[16 .. (16 + kArgsLength*8)] : v8::PropertyCallbackInfo::args_
   //  -- ...
-  //  -- r8                    : api_function_address
+  //  -- r8                              : api_function_address
   // -----------------------------------
 
 #if defined(__MINGW64__) || defined(_WIN64)
@@ -5368,23 +5422,25 @@ void CallApiGetterStub::Generate(MacroAssembler* masm) {
   DCHECK(api_function_address.is(r8));
   Register scratch = rax;
 
-  // v8::Arguments::values_ and handler for name.
-  const int kStackSpace = PropertyCallbackArguments::kArgsLength + 1;
+  // v8::PropertyCallbackInfo::args_ array and name handle.
+  const int kStackUnwindSpace = PropertyCallbackArguments::kArgsLength + 1;
 
-  // Allocate v8::AccessorInfo in non-GCed stack space.
+  // Allocate v8::PropertyCallbackInfo in non-GCed stack space.
   const int kArgStackSpace = 1;
 
-  __ leap(name_arg, Operand(rsp, kPCOnStackSize));
+  // Load address of v8::PropertyAccessorInfo::args_ array.
+  __ leap(scratch, Operand(rsp, 2 * kPointerSize));
 
   PrepareCallApiFunction(masm, kArgStackSpace);
-  __ leap(scratch, Operand(name_arg, 1 * kPointerSize));
+  // Create v8::PropertyCallbackInfo object on the stack and initialize
+  // it's args_ field.
+  Operand info_object = StackSpaceOperand(0);
+  __ movp(info_object, scratch);
 
-  // v8::PropertyAccessorInfo::args_.
-  __ movp(StackSpaceOperand(0), scratch);
-
+  __ leap(name_arg, Operand(scratch, -kPointerSize));
   // The context register (rsi) has been saved in PrepareCallApiFunction and
   // could be used to pass arguments.
-  __ leap(accessor_info_arg, StackSpaceOperand(0));
+  __ leap(accessor_info_arg, info_object);
 
   ExternalReference thunk_ref =
       ExternalReference::invoke_accessor_getter_callback(isolate());
@@ -5394,13 +5450,12 @@ void CallApiGetterStub::Generate(MacroAssembler* masm) {
   DCHECK(!api_function_address.is(accessor_info_arg) &&
          !api_function_address.is(name_arg));
 
-  // The name handler is counted as an argument.
-  StackArgumentsAccessor args(rbp, PropertyCallbackArguments::kArgsLength);
-  Operand return_value_operand = args.GetArgumentOperand(
-      PropertyCallbackArguments::kArgsLength - 1 -
-      PropertyCallbackArguments::kReturnValueOffset);
+  // +3 is to skip prolog, return address and name handle.
+  Operand return_value_operand(
+      rbp, (PropertyCallbackArguments::kReturnValueOffset + 3) * kPointerSize);
   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, getter_arg,
-                           kStackSpace, nullptr, return_value_operand, NULL);
+                           kStackUnwindSpace, nullptr, return_value_operand,
+                           NULL);
 }
 
 

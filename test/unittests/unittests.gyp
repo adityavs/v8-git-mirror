@@ -22,10 +22,6 @@
       'include_dirs': [
         '../..',
       ],
-      'defines': [
-        # TODO(jochen): Remove again after this is globally turned on.
-        'V8_IMMINENT_DEPRECATION_WARNINGS',
-      ],
       'sources': [  ### gcmole(all) ###
         'atomic-utils-unittest.cc',
         'base/bits-unittest.cc',
@@ -101,6 +97,9 @@
         'interpreter/bytecodes-unittest.cc',
         'interpreter/bytecode-array-builder-unittest.cc',
         'interpreter/bytecode-array-iterator-unittest.cc',
+        'interpreter/bytecode-register-allocator-unittest.cc',
+        'interpreter/constant-array-builder-unittest.cc',
+        'interpreter/register-translator-unittest.cc',
         'libplatform/default-platform-unittest.cc',
         'libplatform/task-queue-unittest.cc',
         'libplatform/worker-thread-unittest.cc',
@@ -114,6 +113,11 @@
         'runtime/runtime-interpreter-unittest.cc',
         'test-utils.h',
         'test-utils.cc',
+        'wasm/ast-decoder-unittest.cc',
+        'wasm/encoder-unittest.cc',
+        'wasm/loop-assignment-analysis-unittest.cc',
+        'wasm/module-decoder-unittest.cc',
+        'wasm/wasm-macro-gen-unittest.cc',
       ],
       'conditions': [
         ['v8_target_arch=="arm"', {
@@ -172,11 +176,6 @@
               '-pedantic',
             ],
           },
-        }],
-        ['v8_wasm!=0', {
-          'dependencies': [
-            '../../third_party/wasm/test/unittests/wasm/wasm.gyp:wasm_unittests',
-          ],
         }],
       ],
     },

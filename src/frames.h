@@ -176,12 +176,30 @@ class ConstructFrameConstants : public AllStatic {
 
 class InterpreterFrameConstants : public AllStatic {
  public:
+  // Fixed frame includes new.target and bytecode offset.
+  static const int kFixedFrameSize =
+      StandardFrameConstants::kFixedFrameSize + 2 * kPointerSize;
+  static const int kFixedFrameSizeFromFp =
+      StandardFrameConstants::kFixedFrameSizeFromFp + 2 * kPointerSize;
+
+  // FP-relative.
+  static const int kBytecodeOffsetFromFp =
+      -StandardFrameConstants::kFixedFrameSizeFromFp - 2 * kPointerSize;
+  static const int kRegisterFilePointerFromFp =
+      -StandardFrameConstants::kFixedFrameSizeFromFp - 3 * kPointerSize;
+
+  // Expression index for {StandardFrame::GetExpressionAddress}.
+  static const int kBytecodeOffsetExpressionIndex = 1;
+  static const int kRegisterFileExpressionIndex = 2;
+
   // Register file pointer relative.
   static const int kLastParamFromRegisterPointer =
-      StandardFrameConstants::kFixedFrameSize + 2 * kPointerSize;
-  static const int kNewTargetFromRegisterPointer = kPointerSize;
-  static const int kFunctionFromRegisterPointer = 2 * kPointerSize;
-  static const int kContextFromRegisterPointer = 3 * kPointerSize;
+      StandardFrameConstants::kFixedFrameSize + 3 * kPointerSize;
+
+  static const int kBytecodeOffsetFromRegisterPointer = 1 * kPointerSize;
+  static const int kNewTargetFromRegisterPointer = 2 * kPointerSize;
+  static const int kFunctionFromRegisterPointer = 3 * kPointerSize;
+  static const int kContextFromRegisterPointer = 4 * kPointerSize;
 };
 
 
@@ -237,6 +255,7 @@ class StackFrame BASE_EMBEDDED {
   bool is_entry_construct() const { return type() == ENTRY_CONSTRUCT; }
   bool is_exit() const { return type() == EXIT; }
   bool is_optimized() const { return type() == OPTIMIZED; }
+  bool is_interpreted() const { return type() == INTERPRETED; }
   bool is_arguments_adaptor() const { return type() == ARGUMENTS_ADAPTOR; }
   bool is_internal() const { return type() == INTERNAL; }
   bool is_stub_failure_trampoline() const {
@@ -526,14 +545,14 @@ class StandardFrame: public StackFrame {
 
 class FrameSummary BASE_EMBEDDED {
  public:
-  FrameSummary(Object* receiver, JSFunction* function, Code* code, int offset,
+  FrameSummary(Object* receiver, JSFunction* function,
+               AbstractCode* abstract_code, int code_offset,
                bool is_constructor);
 
   Handle<Object> receiver() { return receiver_; }
   Handle<JSFunction> function() { return function_; }
-  Handle<Code> code() { return code_; }
-  Address pc() { return code_->address() + offset_; }
-  int offset() { return offset_; }
+  Handle<AbstractCode> abstract_code() { return abstract_code_; }
+  int code_offset() { return code_offset_; }
   bool is_constructor() { return is_constructor_; }
 
   void Print();
@@ -541,8 +560,8 @@ class FrameSummary BASE_EMBEDDED {
  private:
   Handle<Object> receiver_;
   Handle<JSFunction> function_;
-  Handle<Code> code_;
-  int offset_;
+  Handle<AbstractCode> abstract_code_;
+  int code_offset_;
   bool is_constructor_;
 };
 
@@ -605,9 +624,12 @@ class JavaScriptFrame: public StandardFrame {
   virtual void Summarize(List<FrameSummary>* frames);
 
   // Lookup exception handler for current {pc}, returns -1 if none found. Also
-  // returns the expected number of stack slots at the handler site.
+  // returns data associated with the handler site specific to the frame type:
+  //  - JavaScriptFrame : Data is the stack depth at entry of the try-block.
+  //  - OptimizedFrame  : Data is the stack slot count of the entire frame.
+  //  - InterpretedFrame: Data is the register index holding the context.
   virtual int LookupExceptionHandlerInTable(
-      int* stack_slots, HandlerTable::CatchPrediction* prediction);
+      int* data, HandlerTable::CatchPrediction* prediction);
 
   // Architecture-specific register description.
   static Register fp_register();
@@ -679,10 +701,9 @@ class OptimizedFrame : public JavaScriptFrame {
 
   void Summarize(List<FrameSummary>* frames) override;
 
-  // Lookup exception handler for current {pc}, returns -1 if none found. Also
-  // returns the expected number of stack slots at the handler site.
+  // Lookup exception handler for current {pc}, returns -1 if none found.
   int LookupExceptionHandlerInTable(
-      int* stack_slots, HandlerTable::CatchPrediction* prediction) override;
+      int* data, HandlerTable::CatchPrediction* prediction) override;
 
   DeoptimizationInputData* GetDeoptimizationData(int* deopt_index) const;
 
@@ -699,7 +720,25 @@ class OptimizedFrame : public JavaScriptFrame {
 
 
 class InterpretedFrame : public JavaScriptFrame {
+ public:
   Type type() const override { return INTERPRETED; }
+
+  // Lookup exception handler for current {pc}, returns -1 if none found.
+  int LookupExceptionHandlerInTable(
+      int* data, HandlerTable::CatchPrediction* prediction) override;
+
+  // Returns the current offset into the bytecode stream.
+  int GetBytecodeOffset() const;
+
+  // Updates the current offset into the bytecode stream, mainly used for stack
+  // unwinding to continue execution at a different bytecode offset.
+  void PatchBytecodeOffset(int new_offset);
+
+  // Access to the interpreter register file for this frame.
+  Object* GetInterpreterRegister(int register_index) const;
+
+  // Build a list with summaries for this frame including all inlined frames.
+  void Summarize(List<FrameSummary>* frames) override;
 
  protected:
   inline explicit InterpretedFrame(StackFrameIteratorBase* iterator);

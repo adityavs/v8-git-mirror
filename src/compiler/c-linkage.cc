@@ -133,7 +133,7 @@ LinkageLocation regloc(Register reg) {
 
 // General code uses the above configuration data.
 CallDescriptor* Linkage::GetSimplifiedCDescriptor(
-    Zone* zone, const MachineSignature* msig) {
+    Zone* zone, const MachineSignature* msig, bool set_initialize_root_flag) {
   LocationSignature::Builder locations(zone, msig->return_count(),
                                        msig->parameter_count());
 #if 0  // TODO(titzer): instruction selector tests break here.
@@ -208,7 +208,7 @@ CallDescriptor* Linkage::GetSimplifiedCDescriptor(
 #endif
 
   // The target for C calls is always an address (i.e. machine pointer).
-  MachineType target_type = kMachPtr;
+  MachineType target_type = MachineType::Pointer();
   LinkageLocation target_loc = LinkageLocation::ForAnyRegister();
   return new (zone) CallDescriptor(  // --
       CallDescriptor::kCallAddress,  // kind
@@ -220,7 +220,9 @@ CallDescriptor* Linkage::GetSimplifiedCDescriptor(
       Operator::kNoProperties,       // properties
       kCalleeSaveRegisters,          // callee-saved registers
       kCalleeSaveFPRegisters,        // callee-saved fp regs
-      CallDescriptor::kNoFlags,      // flags
+      set_initialize_root_flag ?     // flags
+          CallDescriptor::kInitializeRootRegister
+                               : CallDescriptor::kNoFlags,
       "c-call");
 }
 

@@ -2,9 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(mythria): Remove this define after this flag is turned on globally
-#define V8_IMMINENT_DEPRECATION_WARNINGS
-
 #include <stdlib.h>
 #include <utility>
 
@@ -18,7 +15,7 @@
 #include "src/ic/ic.h"
 #include "src/macro-assembler.h"
 #include "test/cctest/cctest.h"
-#include "test/cctest/heap-tester.h"
+#include "test/cctest/heap/utils-inl.h"
 
 using namespace v8::base;
 using namespace v8::internal;
@@ -744,22 +741,41 @@ TEST(LayoutDescriptorAppendAllDoubles) {
 static Handle<LayoutDescriptor> TestLayoutDescriptorAppendIfFastOrUseFull(
     Isolate* isolate, int inobject_properties,
     Handle<DescriptorArray> descriptors, int number_of_descriptors) {
-  Handle<Map> map = Map::Create(isolate, inobject_properties);
+  Handle<Map> initial_map = Map::Create(isolate, inobject_properties);
 
   Handle<LayoutDescriptor> full_layout_descriptor = LayoutDescriptor::New(
-      map, descriptors, descriptors->number_of_descriptors());
+      initial_map, descriptors, descriptors->number_of_descriptors());
 
   int nof = 0;
   bool switched_to_slow_mode = false;
 
+  // This method calls LayoutDescriptor::AppendIfFastOrUseFull() internally
+  // and does all the required map-descriptors related book keeping.
+  Handle<Map> last_map = Map::AddMissingTransitionsForTesting(
+      initial_map, descriptors, full_layout_descriptor);
+
+  // Follow back pointers to construct a sequence of maps from |map|
+  // to |last_map|.
+  int descriptors_length = descriptors->number_of_descriptors();
+  std::vector<Handle<Map>> maps(descriptors_length);
+  {
+    CHECK(last_map->is_stable());
+    Map* map = *last_map;
+    for (int i = 0; i < descriptors_length; i++) {
+      maps[descriptors_length - 1 - i] = handle(map, isolate);
+      Object* maybe_map = map->GetBackPointer();
+      CHECK(maybe_map->IsMap());
+      map = Map::cast(maybe_map);
+      CHECK(!map->is_stable());
+    }
+    CHECK_EQ(1, maps[0]->NumberOfOwnDescriptors());
+  }
+
+  Handle<Map> map;
+  // Now check layout descriptors of all intermediate maps.
   for (int i = 0; i < number_of_descriptors; i++) {
     PropertyDetails details = descriptors->GetDetails(i);
-
-    // This method calls LayoutDescriptor::AppendIfFastOrUseFull() internally
-    // and does all the required map-descriptors related book keeping.
-    map = Map::CopyInstallDescriptorsForTesting(map, i, descriptors,
-                                                full_layout_descriptor);
-
+    map = maps[i];
     LayoutDescriptor* layout_desc = map->layout_descriptor();
 
     if (layout_desc->IsSlowLayout()) {
@@ -931,7 +947,7 @@ TEST(DescriptorArrayTrimming) {
   const int kSplitFieldIndex = 32;
   const int kTrimmedLayoutDescriptorLength = 64;
 
-  Handle<HeapType> any_type = HeapType::Any(isolate);
+  Handle<FieldType> any_type = FieldType::Any(isolate);
   Handle<Map> map = Map::Create(isolate, kFieldCount);
   for (int i = 0; i < kSplitFieldIndex; i++) {
     map = Map::CopyWithField(map, MakeName("prop", i), any_type, NONE,
@@ -1019,7 +1035,7 @@ TEST(DoScavenge) {
   // a pointer to "from space" pointer. Do scavenge one more time and ensure
   // that it didn't crash or corrupt the double value stored in the object.
 
-  Handle<HeapType> any_type = HeapType::Any(isolate);
+  Handle<FieldType> any_type = FieldType::Any(isolate);
   Handle<Map> map = Map::Create(isolate, 10);
   map = Map::CopyWithField(map, MakeName("prop", 0), any_type, NONE,
                            Representation::Double(),
@@ -1044,7 +1060,7 @@ TEST(DoScavenge) {
   CcTest::heap()->CollectGarbage(i::NEW_SPACE);
 
   // Create temp object in the new space.
-  Handle<JSArray> temp = factory->NewJSArray(FAST_ELEMENTS);
+  Handle<JSArray> temp = factory->NewJSArray(0, FAST_ELEMENTS);
   CHECK(isolate->heap()->new_space()->Contains(*temp));
 
   // Construct a double value that looks like a pointer to the new space object
@@ -1081,7 +1097,7 @@ TEST(DoScavengeWithIncrementalWriteBarrier) {
   // scavenges to promote |obj| to old space, a GC in old space and ensure that
   // the tagged value was properly updated after candidates evacuation.
 
-  Handle<HeapType> any_type = HeapType::Any(isolate);
+  Handle<FieldType> any_type = FieldType::Any(isolate);
   Handle<Map> map = Map::Create(isolate, 10);
   map = Map::CopyWithField(map, MakeName("prop", 0), any_type, NONE,
                            Representation::Double(),
@@ -1305,7 +1321,7 @@ TEST(LayoutDescriptorSharing) {
   CcTest::InitializeVM();
   v8::HandleScope scope(CcTest::isolate());
   Isolate* isolate = CcTest::i_isolate();
-  Handle<HeapType> any_type = HeapType::Any(isolate);
+  Handle<FieldType> any_type = FieldType::Any(isolate);
 
   Handle<Map> split_map;
   {
@@ -1353,7 +1369,7 @@ TEST(StoreBufferScanOnScavenge) {
   Factory* factory = isolate->factory();
   v8::HandleScope scope(CcTest::isolate());
 
-  Handle<HeapType> any_type = HeapType::Any(isolate);
+  Handle<FieldType> any_type = FieldType::Any(isolate);
   Handle<Map> map = Map::Create(isolate, 10);
   map = Map::CopyWithField(map, MakeName("prop", 0), any_type, NONE,
                            Representation::Double(),
@@ -1383,7 +1399,7 @@ TEST(StoreBufferScanOnScavenge) {
   CHECK(isolate->heap()->old_space()->Contains(*obj));
 
   // Create temp object in the new space.
-  Handle<JSArray> temp = factory->NewJSArray(FAST_ELEMENTS);
+  Handle<JSArray> temp = factory->NewJSArray(0, FAST_ELEMENTS);
   CHECK(isolate->heap()->new_space()->Contains(*temp));
 
   // Construct a double value that looks like a pointer to the new space object
@@ -1564,7 +1580,7 @@ static void TestWriteBarrierObjectShiftFieldsRight(
   Isolate* isolate = CcTest::i_isolate();
   v8::HandleScope scope(CcTest::isolate());
 
-  Handle<HeapType> any_type = HeapType::Any(isolate);
+  Handle<FieldType> any_type = FieldType::Any(isolate);
 
   CompileRun("function func() { return 1; }");
 

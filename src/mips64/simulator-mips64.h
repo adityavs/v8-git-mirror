@@ -31,7 +31,6 @@ namespace internal {
 // should act as a function matching the type arm_regexp_matcher.
 // The fifth (or ninth) argument is a dummy that reserves the space used for
 // the return address added by the ExitFrame in native calls.
-#ifdef MIPS_ABI_N64
 typedef int (*mips_regexp_matcher)(String* input,
                                    int64_t start_offset,
                                    const byte* input_start,
@@ -47,26 +46,6 @@ typedef int (*mips_regexp_matcher)(String* input,
                                    p7, p8)                                     \
   (FUNCTION_CAST<mips_regexp_matcher>(entry)(p0, p1, p2, p3, p4, p5, p6, p7,   \
                                              NULL, p8))
-
-#else  // O32 Abi.
-
-typedef int (*mips_regexp_matcher)(String* input,
-                                   int32_t start_offset,
-                                   const byte* input_start,
-                                   const byte* input_end,
-                                   void* return_address,
-                                   int* output,
-                                   int32_t output_size,
-                                   Address stack_base,
-                                   int32_t direct_call,
-                                   Isolate* isolate);
-
-#define CALL_GENERATED_REGEXP_CODE(isolate, entry, p0, p1, p2, p3, p4, p5, p6, \
-                                   p7, p8)                                     \
-  (FUNCTION_CAST<mips_regexp_matcher>(entry)(p0, p1, p2, p3, NULL, p4, p5, p6, \
-                                             p7, p8))
-
-#endif  // MIPS_ABI_N64
 
 
 // The stack limit beyond which we will throw stack overflow errors in
@@ -336,6 +315,24 @@ class Simulator {
   inline int32_t SetDoubleHIW(double* addr);
   inline int32_t SetDoubleLOW(double* addr);
 
+  // Min/Max template functions for Double and Single arguments.
+  enum class IsMin : int { kMin = 0, kMax = 1 };
+
+  template <typename T>
+  bool FPUProcessNaNsAndZeros(T a, T b, IsMin min, T& result);
+
+  template <typename T>
+  T FPUMin(T a, T b);
+
+  template <typename T>
+  T FPUMax(T a, T b);
+
+  template <typename T>
+  T FPUMinA(T a, T b);
+
+  template <typename T>
+  T FPUMaxA(T a, T b);
+
   // functions called from DecodeTypeRegister.
   void DecodeTypeRegisterCOP1();
 
@@ -379,6 +376,7 @@ class Simulator {
   inline int32_t ft_reg() const { return currentInstr_->FtValue(); }
   inline int32_t fd_reg() const { return currentInstr_->FdValue(); }
   inline int32_t sa() const { return currentInstr_->SaValue(); }
+  inline int32_t lsa_sa() const { return currentInstr_->LsaSaValue(); }
 
   inline void SetResult(const int32_t rd_reg, const int64_t alu_out) {
     set_register(rd_reg, alu_out);
@@ -390,6 +388,18 @@ class Simulator {
 
   // Used for breakpoints and traps.
   void SoftwareInterrupt(Instruction* instr);
+
+  // Compact branch guard.
+  void CheckForbiddenSlot(int64_t current_pc) {
+    Instruction* instr_after_compact_branch =
+        reinterpret_cast<Instruction*>(current_pc + Instruction::kInstrSize);
+    if (instr_after_compact_branch->IsForbiddenAfterBranch()) {
+      V8_Fatal(__FILE__, __LINE__,
+               "Error: Unexpected instruction 0x%08x immediately after a "
+               "compact branch instruction.",
+               *reinterpret_cast<uint32_t*>(instr_after_compact_branch));
+    }
+  }
 
   // Stop helper functions.
   bool IsWatchpoint(uint64_t code);
@@ -413,7 +423,7 @@ class Simulator {
       return;
     }
 
-    if (instr->IsForbiddenInBranchDelay()) {
+    if (instr->IsForbiddenAfterBranch()) {
       V8_Fatal(__FILE__, __LINE__,
                "Eror:Unexpected %i opcode in a branch delay slot.",
                instr->OpcodeValue());
@@ -503,18 +513,11 @@ class Simulator {
       reinterpret_cast<int64_t*>(p3), reinterpret_cast<int64_t*>(p4)))
 
 
-#ifdef MIPS_ABI_N64
 #define CALL_GENERATED_REGEXP_CODE(isolate, entry, p0, p1, p2, p3, p4, p5, p6, \
                                    p7, p8)                                     \
   static_cast<int>(Simulator::current(isolate)->Call(                          \
       entry, 10, p0, p1, p2, p3, p4, reinterpret_cast<int64_t*>(p5), p6, p7,   \
       NULL, p8))
-#else  // Must be O32 Abi.
-#define CALL_GENERATED_REGEXP_CODE(isolate, entry, p0, p1, p2, p3, p4, p5, p6, \
-                                   p7, p8)                                     \
-  static_cast<int>(Simulator::current(isolate)->Call(                          \
-      entry, 10, p0, p1, p2, p3, NULL, p4, p5, p6, p7, p8))
-#endif  // MIPS_ABI_N64
 
 
 // The simulator has its own stack. Thus it has a different stack limit from

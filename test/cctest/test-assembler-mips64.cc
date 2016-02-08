@@ -25,9 +25,6 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// TODO(jochen): Remove this after the setting is turned on globally.
-#define V8_IMMINENT_DEPRECATION_WARNINGS
-
 #include <iostream>  // NOLINT(readability/streams)
 
 #include "src/v8.h"
@@ -49,8 +46,6 @@ typedef Object* (*F1)(int x, int p1, int p2, int p3, int p4);
 typedef Object* (*F2)(int x, int y, int p2, int p3, int p4);
 typedef Object* (*F3)(void* p, int p1, int p2, int p3, int p4);
 typedef Object* (*F4)(int64_t x, int64_t y, int64_t p2, int64_t p3, int64_t p4);
-
-// clang-format off
 
 
 #define __ assm.
@@ -1591,10 +1586,10 @@ TEST(min_max) {
     CcTest::InitializeVM();
     Isolate* isolate = CcTest::i_isolate();
     HandleScope scope(isolate);
-    MacroAssembler assm(isolate, NULL, 0,
+    MacroAssembler assm(isolate, nullptr, 0,
                         v8::internal::CodeObjectRequired::kYes);
 
-    typedef struct test_float {
+    struct TestFloat {
       double a;
       double b;
       double c;
@@ -1603,21 +1598,35 @@ TEST(min_max) {
       float f;
       float g;
       float h;
-    } TestFloat;
+    };
 
     TestFloat test;
-    const double double_nan = std::numeric_limits<double>::quiet_NaN();
-    const float  float_nan = std::numeric_limits<float>::quiet_NaN();
-    const int kTableLength = 5;
-    double inputsa[kTableLength] = {2.0, 3.0, double_nan, 3.0, double_nan};
-    double inputsb[kTableLength] = {3.0, 2.0, 3.0, double_nan, double_nan};
-    double outputsdmin[kTableLength] = {2.0, 2.0, 3.0, 3.0, double_nan};
-    double outputsdmax[kTableLength] = {3.0, 3.0, 3.0, 3.0, double_nan};
+    const double dnan = std::numeric_limits<double>::quiet_NaN();
+    const double dinf = std::numeric_limits<double>::infinity();
+    const double dminf = -std::numeric_limits<double>::infinity();
+    const float fnan = std::numeric_limits<float>::quiet_NaN();
+    const float finf = std::numeric_limits<float>::infinity();
+    const float fminf = std::numeric_limits<float>::infinity();
+    const int kTableLength = 13;
+    double inputsa[kTableLength] = {2.0,  3.0,  dnan, 3.0,   -0.0, 0.0, dinf,
+                                    dnan, 42.0, dinf, dminf, dinf, dnan};
+    double inputsb[kTableLength] = {3.0,  2.0,  3.0,  dnan, 0.0,   -0.0, dnan,
+                                    dinf, dinf, 42.0, dinf, dminf, dnan};
+    double outputsdmin[kTableLength] = {2.0,   2.0,   3.0,  3.0,  -0.0,
+                                        -0.0,  dinf,  dinf, 42.0, 42.0,
+                                        dminf, dminf, dnan};
+    double outputsdmax[kTableLength] = {3.0,  3.0,  3.0,  3.0,  0.0,  0.0, dinf,
+                                        dinf, dinf, dinf, dinf, dinf, dnan};
 
-    float inputse[kTableLength] = {2.0, 3.0, float_nan, 3.0, float_nan};
-    float inputsf[kTableLength] = {3.0, 2.0, 3.0, float_nan, float_nan};
-    float outputsfmin[kTableLength] = {2.0, 2.0, 3.0, 3.0, float_nan};
-    float outputsfmax[kTableLength] = {3.0, 3.0, 3.0, 3.0, float_nan};
+    float inputse[kTableLength] = {2.0,  3.0,  fnan, 3.0,   -0.0, 0.0, finf,
+                                   fnan, 42.0, finf, fminf, finf, fnan};
+    float inputsf[kTableLength] = {3.0,  2.0,  3.0,  fnan, -0.0,  0.0, fnan,
+                                   finf, finf, 42.0, finf, fminf, fnan};
+    float outputsfmin[kTableLength] = {2.0,   2.0,   3.0,  3.0,  -0.0,
+                                       -0.0,  finf,  finf, 42.0, 42.0,
+                                       fminf, fminf, fnan};
+    float outputsfmax[kTableLength] = {3.0,  3.0,  3.0,  3.0,  0.0,  0.0, finf,
+                                       finf, finf, finf, finf, finf, fnan};
 
     __ ldc1(f4, MemOperand(a0, offsetof(TestFloat, a)));
     __ ldc1(f8, MemOperand(a0, offsetof(TestFloat, b)));
@@ -1951,16 +1960,20 @@ TEST(rint_s)  {
 
 TEST(mina_maxa) {
   if (kArchVariant == kMips64r6) {
-    const int kTableLength = 15;
+    const int kTableLength = 23;
     CcTest::InitializeVM();
     Isolate* isolate = CcTest::i_isolate();
     HandleScope scope(isolate);
-    MacroAssembler assm(isolate, NULL, 0,
+    MacroAssembler assm(isolate, nullptr, 0,
                         v8::internal::CodeObjectRequired::kYes);
-    const double double_nan = std::numeric_limits<double>::quiet_NaN();
-    const float  float_nan = std::numeric_limits<float>::quiet_NaN();
+    const double dnan = std::numeric_limits<double>::quiet_NaN();
+    const double dinf = std::numeric_limits<double>::infinity();
+    const double dminf = -std::numeric_limits<double>::infinity();
+    const float fnan = std::numeric_limits<float>::quiet_NaN();
+    const float finf = std::numeric_limits<float>::infinity();
+    const float fminf = std::numeric_limits<float>::infinity();
 
-    typedef struct test_float {
+    struct TestFloat {
       double a;
       double b;
       double resd;
@@ -1969,41 +1982,34 @@ TEST(mina_maxa) {
       float d;
       float resf;
       float resf1;
-    }TestFloat;
+    };
 
     TestFloat test;
     double inputsa[kTableLength] = {
-      5.3, 4.8, 6.1, 9.8, 9.8, 9.8, -10.0, -8.9,
-      -9.8, -10.0, -8.9, -9.8, double_nan, 3.0, double_nan
-    };
+        5.3,  4.8, 6.1,  9.8, 9.8,  9.8,  -10.0, -8.9, -9.8,  -10.0, -8.9, -9.8,
+        dnan, 3.0, -0.0, 0.0, dinf, dnan, 42.0,  dinf, dminf, dinf,  dnan};
     double inputsb[kTableLength] = {
-      4.8, 5.3, 6.1, -10.0, -8.9, -9.8, 9.8, 9.8,
-      9.8, -9.8, -11.2, -9.8, 3.0, double_nan, double_nan
-    };
+        4.8, 5.3,  6.1, -10.0, -8.9, -9.8, 9.8,  9.8,  9.8,  -9.8,  -11.2, -9.8,
+        3.0, dnan, 0.0, -0.0,  dnan, dinf, dinf, 42.0, dinf, dminf, dnan};
     double resd[kTableLength] = {
-      4.8, 4.8, 6.1, 9.8, -8.9, -9.8, 9.8, -8.9,
-      -9.8, -9.8, -8.9, -9.8, 3.0, 3.0, double_nan
-    };
+        4.8, 4.8, 6.1,  9.8,  -8.9, -9.8, 9.8,  -8.9, -9.8,  -9.8,  -8.9, -9.8,
+        3.0, 3.0, -0.0, -0.0, dinf, dinf, 42.0, 42.0, dminf, dminf, dnan};
     double resd1[kTableLength] = {
-      5.3, 5.3, 6.1, -10.0, 9.8, 9.8, -10.0, 9.8,
-      9.8, -10.0, -11.2, -9.8, 3.0, 3.0, double_nan
-    };
+        5.3, 5.3, 6.1, -10.0, 9.8,  9.8,  -10.0, 9.8,  9.8,  -10.0, -11.2, -9.8,
+        3.0, 3.0, 0.0, 0.0,   dinf, dinf, dinf,  dinf, dinf, dinf,  dnan};
     float inputsc[kTableLength] = {
-      5.3, 4.8, 6.1, 9.8, 9.8, 9.8, -10.0, -8.9,
-      -9.8, -10.0, -8.9, -9.8, float_nan, 3.0, float_nan
-    };
-    float inputsd[kTableLength] = {
-      4.8, 5.3, 6.1, -10.0, -8.9, -9.8, 9.8, 9.8,
-      9.8, -9.8, -11.2, -9.8, 3.0, float_nan, float_nan
-    };
+        5.3,  4.8, 6.1,  9.8, 9.8,  9.8,  -10.0, -8.9, -9.8,  -10.0, -8.9, -9.8,
+        fnan, 3.0, -0.0, 0.0, finf, fnan, 42.0,  finf, fminf, finf,  fnan};
+    float inputsd[kTableLength] = {4.8,  5.3,  6.1,  -10.0, -8.9,  -9.8,
+                                   9.8,  9.8,  9.8,  -9.8,  -11.2, -9.8,
+                                   3.0,  fnan, -0.0, 0.0,   fnan,  finf,
+                                   finf, 42.0, finf, fminf, fnan};
     float resf[kTableLength] = {
-      4.8, 4.8, 6.1, 9.8, -8.9, -9.8, 9.8, -8.9,
-      -9.8, -9.8, -8.9, -9.8, 3.0, 3.0, float_nan
-    };
+        4.8, 4.8, 6.1,  9.8,  -8.9, -9.8, 9.8,  -8.9, -9.8,  -9.8,  -8.9, -9.8,
+        3.0, 3.0, -0.0, -0.0, finf, finf, 42.0, 42.0, fminf, fminf, fnan};
     float resf1[kTableLength] = {
-      5.3, 5.3, 6.1, -10.0, 9.8, 9.8, -10.0, 9.8,
-      9.8, -10.0, -11.2, -9.8, 3.0, 3.0, float_nan
-    };
+        5.3, 5.3, 6.1, -10.0, 9.8,  9.8,  -10.0, 9.8,  9.8,  -10.0, -11.2, -9.8,
+        3.0, 3.0, 0.0, 0.0,   finf, finf, finf,  finf, finf, finf,  fnan};
 
     __ ldc1(f2, MemOperand(a0, offsetof(TestFloat, a)) );
     __ ldc1(f4, MemOperand(a0, offsetof(TestFloat, b)) );
@@ -3227,23 +3233,20 @@ TEST(jump_tables1) {
 
   __ daddiu(sp, sp, -8);
   __ sd(ra, MemOperand(sp));
-  if ((assm.pc_offset() & 7) == 0) {
-    __ nop();
-  }
+  __ Align(8);
 
   Label done;
   {
-    __ BlockTrampolinePoolFor(kNumCases * 2 + 7);
+    __ BlockTrampolinePoolFor(kNumCases * 2 + 6);
     PredictableCodeSizeScope predictable(
-        &assm, (kNumCases * 2 + 7) * Assembler::kInstrSize);
+        &assm, (kNumCases * 2 + 6) * Assembler::kInstrSize);
     Label here;
 
     __ bal(&here);
-    __ nop();
+    __ dsll(at, a0, 3);  // In delay slot.
     __ bind(&here);
-    __ dsll(at, a0, 3);
     __ daddu(at, at, ra);
-    __ ld(at, MemOperand(at, 5 * Assembler::kInstrSize));
+    __ ld(at, MemOperand(at, 4 * Assembler::kInstrSize));
     __ jr(at);
     __ nop();
     for (int i = 0; i < kNumCases; ++i) {
@@ -3309,22 +3312,19 @@ TEST(jump_tables2) {
     __ nop();
   }
 
-  if ((assm.pc_offset() & 7) == 0) {
-    __ nop();
-  }
+  __ Align(8);
   __ bind(&dispatch);
   {
-    __ BlockTrampolinePoolFor(kNumCases * 2 + 7);
+    __ BlockTrampolinePoolFor(kNumCases * 2 + 6);
     PredictableCodeSizeScope predictable(
-        &assm, (kNumCases * 2 + 7) * Assembler::kInstrSize);
+        &assm, (kNumCases * 2 + 6) * Assembler::kInstrSize);
     Label here;
 
     __ bal(&here);
-    __ nop();
+    __ dsll(at, a0, 3);  // In delay slot.
     __ bind(&here);
-    __ dsll(at, a0, 3);
     __ daddu(at, at, ra);
-    __ ld(at, MemOperand(at, 5 * Assembler::kInstrSize));
+    __ ld(at, MemOperand(at, 4 * Assembler::kInstrSize));
     __ jr(at);
     __ nop();
     for (int i = 0; i < kNumCases; ++i) {
@@ -3377,6 +3377,7 @@ TEST(jump_tables3) {
 
   Label done, dispatch;
   __ b(&dispatch);
+  __ nop();
 
 
   for (int i = 0; i < kNumCases; ++i) {
@@ -3391,23 +3392,19 @@ TEST(jump_tables3) {
     __ nop();
   }
 
-  __ stop("chk");
-  if ((assm.pc_offset() & 7) == 0) {
-    __ nop();
-  }
+  __ Align(8);
   __ bind(&dispatch);
   {
-    __ BlockTrampolinePoolFor(kNumCases * 2 + 7);
+    __ BlockTrampolinePoolFor(kNumCases * 2 + 6);
     PredictableCodeSizeScope predictable(
-        &assm, (kNumCases * 2 + 7) * Assembler::kInstrSize);
+        &assm, (kNumCases * 2 + 6) * Assembler::kInstrSize);
     Label here;
 
     __ bal(&here);
-    __ nop();
+    __ dsll(at, a0, 3);  // In delay slot.
     __ bind(&here);
-    __ dsll(at, a0, 3);
     __ daddu(at, at, ra);
-    __ ld(at, MemOperand(at, 5 * Assembler::kInstrSize));
+    __ ld(at, MemOperand(at, 4 * Assembler::kInstrSize));
     __ jr(at);
     __ nop();
     for (int i = 0; i < kNumCases; ++i) {
@@ -5552,9 +5549,8 @@ int64_t run_bc(int32_t offset) {
   __ li(t8, 0);
   __ li(t9, 2);   // Condition for the stopping execution.
 
-  uint32_t instruction_addiu = 0x24420001;  // addiu v0, v0, 1
   for (int32_t i = -100; i <= -11; ++i) {
-    __ dd(instruction_addiu);
+    __ addiu(v0, v0, 1);
   }
 
   __ addiu(t8, t8, 1);              // -10
@@ -5573,7 +5569,7 @@ int64_t run_bc(int32_t offset) {
   __ bc(offset);                    // -1
 
   for (int32_t i = 0; i <= 99; ++i) {
-    __ dd(instruction_addiu);
+    __ addiu(v0, v0, 1);
   }
 
   __ pop(ra);

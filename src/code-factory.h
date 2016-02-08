@@ -43,10 +43,12 @@ class CodeFactory final {
       Isolate* isolate, LanguageMode language_mode,
       InlineCacheState initialization_state);
   static Callable CallIC(Isolate* isolate, int argc,
-                         ConvertReceiverMode mode = ConvertReceiverMode::kAny);
+                         ConvertReceiverMode mode = ConvertReceiverMode::kAny,
+                         TailCallMode tail_call_mode = TailCallMode::kDisallow);
   static Callable CallICInOptimizedCode(
       Isolate* isolate, int argc,
-      ConvertReceiverMode mode = ConvertReceiverMode::kAny);
+      ConvertReceiverMode mode = ConvertReceiverMode::kAny,
+      TailCallMode tail_call_mode = TailCallMode::kDisallow);
   static Callable StoreIC(Isolate* isolate, LanguageMode mode);
   static Callable StoreICInOptimizedCode(Isolate* isolate, LanguageMode mode,
                                          InlineCacheState initialization_state);
@@ -70,15 +72,18 @@ class CodeFactory final {
 
   static Callable ToNumber(Isolate* isolate);
   static Callable ToString(Isolate* isolate);
+  static Callable ToName(Isolate* isolate);
   static Callable ToLength(Isolate* isolate);
   static Callable ToObject(Isolate* isolate);
   static Callable NumberToString(Isolate* isolate);
 
   static Callable RegExpConstructResult(Isolate* isolate);
+  static Callable RegExpExec(Isolate* isolate);
 
   static Callable StringAdd(Isolate* isolate, StringAddFlags flags,
                             PretenureFlag pretenure_flag);
   static Callable StringCompare(Isolate* isolate);
+  static Callable SubString(Isolate* isolate);
 
   static Callable Typeof(Isolate* isolate);
 
@@ -92,6 +97,7 @@ class CodeFactory final {
 
   static Callable ArgumentsAccess(Isolate* isolate, bool is_unmapped_arguments,
                                   bool has_duplicate_parameters);
+  static Callable RestArgumentsAccess(Isolate* isolate);
 
   static Callable AllocateHeapNumber(Isolate* isolate);
   static Callable AllocateMutableHeapNumber(Isolate* isolate);
@@ -103,10 +109,11 @@ class CodeFactory final {
   static Callable CallFunction(
       Isolate* isolate, ConvertReceiverMode mode = ConvertReceiverMode::kAny);
   static Callable Construct(Isolate* isolate);
+  static Callable ConstructFunction(Isolate* isolate);
 
   static Callable InterpreterPushArgsAndCall(Isolate* isolate);
   static Callable InterpreterPushArgsAndConstruct(Isolate* isolate);
-  static Callable InterpreterCEntry(Isolate* isolate);
+  static Callable InterpreterCEntry(Isolate* isolate, int result_size = 1);
 };
 
 }  // namespace internal

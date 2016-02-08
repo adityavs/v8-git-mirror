@@ -36,11 +36,11 @@ class Schedule;
 // non-schedulable due to missing control and effect dependencies.
 class RawMachineAssembler {
  public:
-  RawMachineAssembler(Isolate* isolate, Graph* graph,
-                      CallDescriptor* call_descriptor,
-                      MachineType word = kMachPtr,
-                      MachineOperatorBuilder::Flags flags =
-                          MachineOperatorBuilder::Flag::kNoFlags);
+  RawMachineAssembler(
+      Isolate* isolate, Graph* graph, CallDescriptor* call_descriptor,
+      MachineRepresentation word = MachineType::PointerRepresentation(),
+      MachineOperatorBuilder::Flags flags =
+          MachineOperatorBuilder::Flag::kNoFlags);
   ~RawMachineAssembler() {}
 
   Isolate* isolate() const { return isolate_; }
@@ -79,6 +79,9 @@ class RawMachineAssembler {
   Node* Int32Constant(int32_t value) {
     return AddNode(common()->Int32Constant(value));
   }
+  Node* StackSlot(MachineRepresentation rep) {
+    return AddNode(machine()->StackSlot(rep));
+  }
   Node* Int64Constant(int64_t value) {
     return AddNode(common()->Int64Constant(value));
   }
@@ -111,17 +114,16 @@ class RawMachineAssembler {
     return Load(rep, base, IntPtrConstant(0));
   }
   Node* Load(MachineType rep, Node* base, Node* index) {
-    return AddNode(machine()->Load(rep), base, index, graph()->start(),
-                   graph()->start());
+    return AddNode(machine()->Load(rep), base, index);
   }
-  Node* Store(MachineType rep, Node* base, Node* value,
+  Node* Store(MachineRepresentation rep, Node* base, Node* value,
               WriteBarrierKind write_barrier) {
     return Store(rep, base, IntPtrConstant(0), value, write_barrier);
   }
-  Node* Store(MachineType rep, Node* base, Node* index, Node* value,
+  Node* Store(MachineRepresentation rep, Node* base, Node* index, Node* value,
               WriteBarrierKind write_barrier) {
     return AddNode(machine()->Store(StoreRepresentation(rep, write_barrier)),
-                   base, index, value, graph()->start(), graph()->start());
+                   base, index, value);
   }
 
   // Arithmetic Operations.
@@ -246,10 +248,10 @@ class RawMachineAssembler {
     return AddNode(machine()->Int32MulHigh(), a, b);
   }
   Node* Int32Div(Node* a, Node* b) {
-    return AddNode(machine()->Int32Div(), a, b, graph()->start());
+    return AddNode(machine()->Int32Div(), a, b);
   }
   Node* Int32Mod(Node* a, Node* b) {
-    return AddNode(machine()->Int32Mod(), a, b, graph()->start());
+    return AddNode(machine()->Int32Mod(), a, b);
   }
   Node* Int32LessThan(Node* a, Node* b) {
     return AddNode(machine()->Int32LessThan(), a, b);
@@ -258,7 +260,7 @@ class RawMachineAssembler {
     return AddNode(machine()->Int32LessThanOrEqual(), a, b);
   }
   Node* Uint32Div(Node* a, Node* b) {
-    return AddNode(machine()->Uint32Div(), a, b, graph()->start());
+    return AddNode(machine()->Uint32Div(), a, b);
   }
   Node* Uint32LessThan(Node* a, Node* b) {
     return AddNode(machine()->Uint32LessThan(), a, b);
@@ -267,7 +269,7 @@ class RawMachineAssembler {
     return AddNode(machine()->Uint32LessThanOrEqual(), a, b);
   }
   Node* Uint32Mod(Node* a, Node* b) {
-    return AddNode(machine()->Uint32Mod(), a, b, graph()->start());
+    return AddNode(machine()->Uint32Mod(), a, b);
   }
   Node* Uint32MulHigh(Node* a, Node* b) {
     return AddNode(machine()->Uint32MulHigh(), a, b);
@@ -276,13 +278,23 @@ class RawMachineAssembler {
   Node* Int32GreaterThanOrEqual(Node* a, Node* b) {
     return Int32LessThanOrEqual(b, a);
   }
+  Node* Uint32GreaterThan(Node* a, Node* b) { return Uint32LessThan(b, a); }
+  Node* Uint32GreaterThanOrEqual(Node* a, Node* b) {
+    return Uint32LessThanOrEqual(b, a);
+  }
   Node* Int32Neg(Node* a) { return Int32Sub(Int32Constant(0), a); }
 
   Node* Int64Add(Node* a, Node* b) {
     return AddNode(machine()->Int64Add(), a, b);
   }
+  Node* Int64AddWithOverflow(Node* a, Node* b) {
+    return AddNode(machine()->Int64AddWithOverflow(), a, b);
+  }
   Node* Int64Sub(Node* a, Node* b) {
     return AddNode(machine()->Int64Sub(), a, b);
+  }
+  Node* Int64SubWithOverflow(Node* a, Node* b) {
+    return AddNode(machine()->Int64SubWithOverflow(), a, b);
   }
   Node* Int64Mul(Node* a, Node* b) {
     return AddNode(machine()->Int64Mul(), a, b);
@@ -310,6 +322,10 @@ class RawMachineAssembler {
   Node* Int64GreaterThanOrEqual(Node* a, Node* b) {
     return Int64LessThanOrEqual(b, a);
   }
+  Node* Uint64GreaterThan(Node* a, Node* b) { return Uint64LessThan(b, a); }
+  Node* Uint64GreaterThanOrEqual(Node* a, Node* b) {
+    return Uint64LessThanOrEqual(b, a);
+  }
   Node* Uint64Div(Node* a, Node* b) {
     return AddNode(machine()->Uint64Div(), a, b);
   }
@@ -333,6 +349,19 @@ class RawMachineAssembler {
   INTPTR_BINOP(Int, GreaterThan);
 
 #undef INTPTR_BINOP
+
+#define UINTPTR_BINOP(prefix, name)                    \
+  Node* UintPtr##name(Node* a, Node* b) {              \
+    return kPointerSize == 8 ? prefix##64##name(a, b)  \
+                             : prefix##32##name(a, b); \
+  }
+
+  UINTPTR_BINOP(Uint, LessThan);
+  UINTPTR_BINOP(Uint, LessThanOrEqual);
+  UINTPTR_BINOP(Uint, GreaterThanOrEqual);
+  UINTPTR_BINOP(Uint, GreaterThan);
+
+#undef UINTPTR_BINOP
 
   Node* Float32Add(Node* a, Node* b) {
     return AddNode(machine()->Float32Add(), a, b);
@@ -427,8 +456,14 @@ class RawMachineAssembler {
   Node* ChangeFloat64ToUint32(Node* a) {
     return AddNode(machine()->ChangeFloat64ToUint32(), a);
   }
-  Node* TruncateFloat32ToInt64(Node* a) {
-    return AddNode(machine()->TruncateFloat32ToInt64(), a);
+  Node* TruncateFloat32ToInt32(Node* a) {
+    return AddNode(machine()->TruncateFloat32ToInt32(), a);
+  }
+  Node* TruncateFloat32ToUint32(Node* a) {
+    return AddNode(machine()->TruncateFloat32ToUint32(), a);
+  }
+  Node* TryTruncateFloat32ToInt64(Node* a) {
+    return AddNode(machine()->TryTruncateFloat32ToInt64(), a);
   }
   Node* TruncateFloat64ToInt64(Node* a) {
     // TODO(ahaas): Remove this function as soon as it is not used anymore in
@@ -438,11 +473,16 @@ class RawMachineAssembler {
   Node* TryTruncateFloat64ToInt64(Node* a) {
     return AddNode(machine()->TryTruncateFloat64ToInt64(), a);
   }
-  Node* TruncateFloat32ToUint64(Node* a) {
-    return AddNode(machine()->TruncateFloat32ToUint64(), a);
+  Node* TryTruncateFloat32ToUint64(Node* a) {
+    return AddNode(machine()->TryTruncateFloat32ToUint64(), a);
   }
   Node* TruncateFloat64ToUint64(Node* a) {
-    return AddNode(machine()->TruncateFloat64ToUint64(), a);
+    // TODO(ahaas): Remove this function as soon as it is not used anymore in
+    // WebAssembly.
+    return AddNode(machine()->TryTruncateFloat64ToUint64(), a);
+  }
+  Node* TryTruncateFloat64ToUint64(Node* a) {
+    return AddNode(machine()->TryTruncateFloat64ToUint64(), a);
   }
   Node* ChangeInt32ToInt64(Node* a) {
     return AddNode(machine()->ChangeInt32ToInt64(), a);
@@ -459,11 +499,17 @@ class RawMachineAssembler {
   Node* TruncateInt64ToInt32(Node* a) {
     return AddNode(machine()->TruncateInt64ToInt32(), a);
   }
+  Node* RoundInt32ToFloat32(Node* a) {
+    return AddNode(machine()->RoundInt32ToFloat32(), a);
+  }
   Node* RoundInt64ToFloat32(Node* a) {
     return AddNode(machine()->RoundInt64ToFloat32(), a);
   }
   Node* RoundInt64ToFloat64(Node* a) {
     return AddNode(machine()->RoundInt64ToFloat64(), a);
+  }
+  Node* RoundUint32ToFloat32(Node* a) {
+    return AddNode(machine()->RoundUint32ToFloat32(), a);
   }
   Node* RoundUint64ToFloat32(Node* a) {
     return AddNode(machine()->RoundUint64ToFloat32(), a);
@@ -536,7 +582,7 @@ class RawMachineAssembler {
   Node* LoadFromPointer(void* address, MachineType rep, int32_t offset = 0) {
     return Load(rep, PointerConstant(address), Int32Constant(offset));
   }
-  Node* StoreToPointer(void* address, MachineType rep, Node* node) {
+  Node* StoreToPointer(void* address, MachineRepresentation rep, Node* node) {
     return Store(rep, PointerConstant(address), node, kNoWriteBarrier);
   }
   Node* StringConstant(const char* string) {
@@ -548,11 +594,16 @@ class RawMachineAssembler {
   // Call a given call descriptor and the given arguments and frame-state.
   Node* CallNWithFrameState(CallDescriptor* desc, Node* function, Node** args,
                             Node* frame_state);
+  // Call to a runtime function with zero arguments.
+  Node* CallRuntime0(Runtime::FunctionId function, Node* context);
   // Call to a runtime function with one arguments.
   Node* CallRuntime1(Runtime::FunctionId function, Node* arg0, Node* context);
   // Call to a runtime function with two arguments.
   Node* CallRuntime2(Runtime::FunctionId function, Node* arg1, Node* arg2,
                      Node* context);
+  // Call to a runtime function with three arguments.
+  Node* CallRuntime3(Runtime::FunctionId function, Node* arg1, Node* arg2,
+                     Node* arg3, Node* context);
   // Call to a runtime function with four arguments.
   Node* CallRuntime4(Runtime::FunctionId function, Node* arg1, Node* arg2,
                      Node* arg3, Node* arg4, Node* context);
@@ -582,7 +633,12 @@ class RawMachineAssembler {
   // Tail call to a runtime function with two arguments.
   Node* TailCallRuntime2(Runtime::FunctionId function, Node* arg1, Node* arg2,
                          Node* context);
-
+  // Tail call to a runtime function with three arguments.
+  Node* TailCallRuntime3(Runtime::FunctionId function, Node* arg1, Node* arg2,
+                         Node* arg3, Node* context);
+  // Tail call to a runtime function with four arguments.
+  Node* TailCallRuntime4(Runtime::FunctionId function, Node* arg1, Node* arg2,
+                         Node* arg3, Node* arg4, Node* context);
 
   // ===========================================================================
   // The following utility methods deal with control flow, hence might switch
@@ -601,25 +657,27 @@ class RawMachineAssembler {
   void Deoptimize(Node* state);
 
   // Variables.
-  Node* Phi(MachineType type, Node* n1, Node* n2) {
-    return AddNode(common()->Phi(type, 2), n1, n2);
+  Node* Phi(MachineRepresentation rep, Node* n1, Node* n2) {
+    return AddNode(common()->Phi(rep, 2), n1, n2, graph()->start());
   }
-  Node* Phi(MachineType type, Node* n1, Node* n2, Node* n3) {
-    return AddNode(common()->Phi(type, 3), n1, n2, n3);
+  Node* Phi(MachineRepresentation rep, Node* n1, Node* n2, Node* n3) {
+    return AddNode(common()->Phi(rep, 3), n1, n2, n3, graph()->start());
   }
-  Node* Phi(MachineType type, Node* n1, Node* n2, Node* n3, Node* n4) {
-    return AddNode(common()->Phi(type, 4), n1, n2, n3, n4);
+  Node* Phi(MachineRepresentation rep, Node* n1, Node* n2, Node* n3, Node* n4) {
+    return AddNode(common()->Phi(rep, 4), n1, n2, n3, n4, graph()->start());
   }
+  Node* Phi(MachineRepresentation rep, int input_count, Node* const* inputs);
+  void AppendPhiInput(Node* phi, Node* new_input);
 
   // ===========================================================================
   // The following generic node creation methods can be used for operators that
   // are not covered by the above utility methods. There should rarely be a need
   // to do that outside of testing though.
 
-  Node* AddNode(const Operator* op, int input_count, Node** inputs);
+  Node* AddNode(const Operator* op, int input_count, Node* const* inputs);
 
   Node* AddNode(const Operator* op) {
-    return AddNode(op, 0, static_cast<Node**>(nullptr));
+    return AddNode(op, 0, static_cast<Node* const*>(nullptr));
   }
 
   template <class... TArgs>
@@ -629,7 +687,7 @@ class RawMachineAssembler {
   }
 
  private:
-  Node* MakeNode(const Operator* op, int input_count, Node** inputs);
+  Node* MakeNode(const Operator* op, int input_count, Node* const* inputs);
   BasicBlock* Use(RawMachineLabel* label);
   BasicBlock* EnsureBlock(RawMachineLabel* label);
   BasicBlock* CurrentBlock();

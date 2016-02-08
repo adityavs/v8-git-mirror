@@ -60,7 +60,6 @@ class LCodeGen;
   V(ConstantT)                               \
   V(ConstructDouble)                         \
   V(Context)                                 \
-  V(DateField)                               \
   V(DebugBreak)                              \
   V(DeclareGlobals)                          \
   V(Deoptimize)                              \
@@ -102,7 +101,6 @@ class LCodeGen;
   V(LoadKeyedGeneric)                        \
   V(LoadNamedField)                          \
   V(LoadNamedGeneric)                        \
-  V(MapEnumLength)                           \
   V(MathAbs)                                 \
   V(MathClz32)                               \
   V(MathExp)                                 \
@@ -1312,35 +1310,6 @@ class LCmpMapAndBranch final : public LControlInstruction<1, 1> {
   DECLARE_HYDROGEN_ACCESSOR(CompareMap)
 
   Handle<Map> map() const { return hydrogen()->map().handle(); }
-};
-
-
-class LMapEnumLength final : public LTemplateInstruction<1, 1, 0> {
- public:
-  explicit LMapEnumLength(LOperand* value) { inputs_[0] = value; }
-
-  LOperand* value() { return inputs_[0]; }
-
-  DECLARE_CONCRETE_INSTRUCTION(MapEnumLength, "map-enum-length")
-};
-
-
-class LDateField final : public LTemplateInstruction<1, 1, 1> {
- public:
-  LDateField(LOperand* date, LOperand* temp, Smi* index) : index_(index) {
-    inputs_[0] = date;
-    temps_[0] = temp;
-  }
-
-  LOperand* date() { return inputs_[0]; }
-  LOperand* temp() { return temps_[0]; }
-  Smi* index() const { return index_; }
-
-  DECLARE_CONCRETE_INSTRUCTION(DateField, "date-field")
-  DECLARE_HYDROGEN_ACCESSOR(DateField)
-
- private:
-  Smi* index_;
 };
 
 

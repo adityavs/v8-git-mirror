@@ -63,6 +63,11 @@ const Register ArgumentsAccessNewDescriptor::parameter_count() { return r5; }
 const Register ArgumentsAccessNewDescriptor::parameter_pointer() { return r6; }
 
 
+const Register RestParamAccessDescriptor::parameter_count() { return r5; }
+const Register RestParamAccessDescriptor::parameter_pointer() { return r6; }
+const Register RestParamAccessDescriptor::rest_parameter_index() { return r7; }
+
+
 const Register ApiGetterDescriptor::function_address() { return r5; }
 
 
@@ -105,6 +110,10 @@ const Register ToLengthDescriptor::ReceiverRegister() { return r3; }
 
 // static
 const Register ToStringDescriptor::ReceiverRegister() { return r3; }
+
+
+// static
+const Register ToNameDescriptor::ReceiverRegister() { return r3; }
 
 
 // static
@@ -160,13 +169,6 @@ void CreateWeakCellDescriptor::InitializePlatformSpecific(
 }
 
 
-void StoreArrayLiteralElementDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  Register registers[] = {r6, r3};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
-}
-
-
 void CallFunctionDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {r4};
@@ -207,6 +209,17 @@ void CallTrampolineDescriptor::InitializePlatformSpecific(
   // r3 : number of arguments
   // r4 : the target to call
   Register registers[] = {r4, r3};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void ConstructStubDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // r3 : number of arguments
+  // r4 : the target to call
+  // r6 : the new target
+  // r5 : allocation site or undefined
+  Register registers[] = {r4, r6, r3, r5};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 

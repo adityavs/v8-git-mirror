@@ -45,11 +45,6 @@ int FrameInspector::GetParametersCount() {
 }
 
 
-int FrameInspector::expression_count() {
-  return deoptimized_frame_->expression_count();
-}
-
-
 Object* FrameInspector::GetFunction() {
   return is_optimized_ ? deoptimized_frame_->GetFunction() : frame_->function();
 }
@@ -74,8 +69,13 @@ Object* FrameInspector::GetExpression(int index) {
 
 
 int FrameInspector::GetSourcePosition() {
-  return is_optimized_ ? deoptimized_frame_->GetSourcePosition()
-                       : frame_->LookupCode()->SourcePosition(frame_->pc());
+  if (is_optimized_) {
+    return deoptimized_frame_->GetSourcePosition();
+  } else {
+    Code* code = frame_->LookupCode();
+    int offset = static_cast<int>(frame_->pc() - code->instruction_start());
+    return code->SourcePosition(offset);
+  }
 }
 
 
@@ -109,6 +109,8 @@ void FrameInspector::MaterializeStackLocals(Handle<JSObject> target,
   // First fill all parameters.
   for (int i = 0; i < scope_info->ParameterCount(); ++i) {
     // Do not materialize the parameter if it is shadowed by a context local.
+    // TODO(yangguo): check whether this is necessary, now that we materialize
+    //                context locals as well.
     Handle<String> name(scope_info->ParameterName(i));
     if (ParameterIsShadowedByContextLocal(scope_info, name)) continue;
 
