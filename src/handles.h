@@ -5,12 +5,14 @@
 #ifndef V8_HANDLES_H_
 #define V8_HANDLES_H_
 
+#include <type_traits>
+
 #include "include/v8.h"
 #include "src/base/functional.h"
 #include "src/base/macros.h"
 #include "src/checks.h"
 #include "src/globals.h"
-#include "src/zone.h"
+#include "src/zone/zone.h"
 
 namespace v8 {
 namespace internal {
@@ -20,7 +22,6 @@ class DeferredHandles;
 class HandleScopeImplementer;
 class Isolate;
 class Object;
-
 
 // ----------------------------------------------------------------------------
 // Base class for Handle instantiations.  Don't use directly.
@@ -37,11 +38,15 @@ class HandleBase {
                 (that.location_ == nullptr ||
                  that.IsDereferenceAllowed(NO_DEFERRED_CHECK)));
     if (this->location_ == that.location_) return true;
-    if (this->location_ == NULL || that.location_ == NULL) return false;
+    if (this->location_ == nullptr || that.location_ == nullptr) return false;
     return *this->location_ == *that.location_;
   }
 
   V8_INLINE bool is_null() const { return location_ == nullptr; }
+
+  // Returns the raw address where this handle is stored. This should only be
+  // used for hashing handles; do not ever try to dereference it.
+  V8_INLINE Address address() const { return bit_cast<Address>(location_); }
 
  protected:
   // Provides the C++ dereference operator.
@@ -59,10 +64,12 @@ class HandleBase {
 
   enum DereferenceCheckMode { INCLUDE_DEFERRED_CHECK, NO_DEFERRED_CHECK };
 #ifdef DEBUG
-  bool IsDereferenceAllowed(DereferenceCheckMode mode) const;
+  bool V8_EXPORT_PRIVATE IsDereferenceAllowed(DereferenceCheckMode mode) const;
 #else
   V8_INLINE
-  bool IsDereferenceAllowed(DereferenceCheckMode mode) const { return true; }
+  bool V8_EXPORT_PRIVATE IsDereferenceAllowed(DereferenceCheckMode mode) const {
+    return true;
+  }
 #endif  // DEBUG
 
   Object** location_;
@@ -85,27 +92,21 @@ class Handle final : public HandleBase {
  public:
   V8_INLINE explicit Handle(T** location = nullptr)
       : HandleBase(reinterpret_cast<Object**>(location)) {
-    Object* a = nullptr;
-    T* b = nullptr;
-    a = b;  // Fake assignment to enforce type checks.
-    USE(a);
+    // Type check:
+    static_assert(std::is_convertible<T*, Object*>::value,
+                  "static type violation");
   }
-  V8_INLINE explicit Handle(T* object) : Handle(object, object->GetIsolate()) {}
-  V8_INLINE Handle(T* object, Isolate* isolate) : HandleBase(object, isolate) {}
+
+  V8_INLINE Handle(T* object, Isolate* isolate);
 
   // Allocate a new handle for the object, do not canonicalize.
   V8_INLINE static Handle<T> New(T* object, Isolate* isolate);
 
   // Constructor for handling automatic up casting.
   // Ex. Handle<JSFunction> can be passed when Handle<Object> is expected.
-  template <typename S>
-  V8_INLINE Handle(Handle<S> handle)
-      : HandleBase(handle) {
-    T* a = nullptr;
-    S* b = nullptr;
-    a = b;  // Fake assignment to enforce type checks.
-    USE(a);
-  }
+  template <typename S, typename = typename std::enable_if<
+                            std::is_convertible<S*, T*>::value>::type>
+  V8_INLINE Handle(Handle<S> handle) : HandleBase(handle) {}
 
   V8_INLINE T* operator->() const { return operator*(); }
 
@@ -121,7 +122,7 @@ class Handle final : public HandleBase {
 
   template <typename S>
   static const Handle<T> cast(Handle<S> that) {
-    T::cast(*reinterpret_cast<T**>(that.location_));
+    T::cast(*reinterpret_cast<T**>(that.location()));
     return Handle<T>(reinterpret_cast<T**>(that.location_));
   }
 
@@ -129,17 +130,20 @@ class Handle final : public HandleBase {
   // MaybeHandle to force validation before being used as handles.
   static const Handle<T> null() { return Handle<T>(); }
 
+  // Location equality.
+  bool equals(Handle<T> other) const { return address() == other.address(); }
+
   // Provide function object for location equality comparison.
   struct equal_to : public std::binary_function<Handle<T>, Handle<T>, bool> {
     V8_INLINE bool operator()(Handle<T> lhs, Handle<T> rhs) const {
-      return lhs.location() == rhs.location();
+      return lhs.equals(rhs);
     }
   };
 
   // Provide function object for location hashing.
   struct hash : public std::unary_function<Handle<T>, size_t> {
     V8_INLINE size_t operator()(Handle<T> const& handle) const {
-      return base::hash<void*>()(handle.location());
+      return base::hash<Address>()(handle.address());
     }
   };
 
@@ -160,16 +164,10 @@ V8_INLINE Handle<T> handle(T* object, Isolate* isolate) {
   return Handle<T>(object, isolate);
 }
 
-template <typename T>
-V8_INLINE Handle<T> handle(T* object) {
-  return Handle<T>(object);
-}
-
-
 // ----------------------------------------------------------------------------
 // A Handle can be converted into a MaybeHandle. Converting a MaybeHandle
-// into a Handle requires checking that it does not point to NULL.  This
-// ensures NULL checks before use.
+// into a Handle requires checking that it does not point to nullptr.  This
+// ensures nullptr checks before use.
 //
 // Also note that Handles do not provide default equality comparison or hashing
 // operators on purpose. Such operators would be misleading, because intended
@@ -178,29 +176,23 @@ template <typename T>
 class MaybeHandle final {
  public:
   V8_INLINE MaybeHandle() {}
-  V8_INLINE ~MaybeHandle() {}
 
   // Constructor for handling automatic up casting from Handle.
   // Ex. Handle<JSArray> can be passed when MaybeHandle<Object> is expected.
-  template <typename S>
+  template <typename S, typename = typename std::enable_if<
+                            std::is_convertible<S*, T*>::value>::type>
   V8_INLINE MaybeHandle(Handle<S> handle)
-      : location_(reinterpret_cast<T**>(handle.location_)) {
-    T* a = nullptr;
-    S* b = nullptr;
-    a = b;  // Fake assignment to enforce type checks.
-    USE(a);
-  }
+      : location_(reinterpret_cast<T**>(handle.location_)) {}
 
   // Constructor for handling automatic up casting.
   // Ex. MaybeHandle<JSArray> can be passed when Handle<Object> is expected.
-  template <typename S>
+  template <typename S, typename = typename std::enable_if<
+                            std::is_convertible<S*, T*>::value>::type>
   V8_INLINE MaybeHandle(MaybeHandle<S> maybe_handle)
-      : location_(reinterpret_cast<T**>(maybe_handle.location_)) {
-    T* a = nullptr;
-    S* b = nullptr;
-    a = b;  // Fake assignment to enforce type checks.
-    USE(a);
-  }
+      : location_(reinterpret_cast<T**>(maybe_handle.location_)) {}
+
+  V8_INLINE MaybeHandle(T* object, Isolate* isolate)
+      : MaybeHandle(handle(object, isolate)) {}
 
   V8_INLINE void Assert() const { DCHECK_NOT_NULL(location_); }
   V8_INLINE void Check() const { CHECK_NOT_NULL(location_); }
@@ -222,6 +214,10 @@ class MaybeHandle final {
     }
   }
 
+  // Returns the raw address where this handle is stored. This should only be
+  // used for hashing handles; do not ever try to dereference it.
+  V8_INLINE Address address() const { return bit_cast<Address>(location_); }
+
   bool is_null() const { return location_ == nullptr; }
 
  protected:
@@ -233,6 +229,43 @@ class MaybeHandle final {
   friend class MaybeHandle;
 };
 
+// A handle which contains a potentially weak pointer. Keeps it alive (strongly)
+// while the MaybeObjectHandle is alive.
+class MaybeObjectHandle {
+ public:
+  inline MaybeObjectHandle();
+  inline MaybeObjectHandle(MaybeObject* object, Isolate* isolate);
+  inline MaybeObjectHandle(Object* object, Isolate* isolate);
+  inline explicit MaybeObjectHandle(Handle<Object> object);
+
+  static inline MaybeObjectHandle Weak(Object* object, Isolate* isolate);
+  static inline MaybeObjectHandle Weak(Handle<Object> object);
+
+  inline MaybeObject* operator*() const;
+  inline MaybeObject* operator->() const;
+  inline Handle<Object> object() const;
+
+  bool is_identical_to(const MaybeObjectHandle& other) const {
+    Handle<Object> this_handle;
+    Handle<Object> other_handle;
+    return reference_type_ == other.reference_type_ &&
+           handle_.ToHandle(&this_handle) ==
+               other.handle_.ToHandle(&other_handle) &&
+           this_handle.is_identical_to(other_handle);
+  }
+
+  bool is_null() const { return handle_.is_null(); }
+
+ private:
+  inline MaybeObjectHandle(Object* object,
+                           HeapObjectReferenceType reference_type,
+                           Isolate* isolate);
+  inline MaybeObjectHandle(Handle<Object> object,
+                           HeapObjectReferenceType reference_type);
+
+  HeapObjectReferenceType reference_type_;
+  MaybeHandle<Object> handle_;
+};
 
 // ----------------------------------------------------------------------------
 // A stack-allocated class that governs a number of local handles.
@@ -254,7 +287,7 @@ class HandleScope {
   inline ~HandleScope();
 
   // Counts the number of allocated handles.
-  static int NumberOfHandles(Isolate* isolate);
+  V8_EXPORT_PRIVATE static int NumberOfHandles(Isolate* isolate);
 
   // Create a new handle or lookup a canonical handle.
   V8_INLINE static Object** GetHandle(Isolate* isolate, Object* value);
@@ -263,7 +296,7 @@ class HandleScope {
   V8_INLINE static Object** CreateHandle(Isolate* isolate, Object* value);
 
   // Deallocates any extensions used by the current scope.
-  static void DeleteExtensions(Isolate* isolate);
+  V8_EXPORT_PRIVATE static void DeleteExtensions(Isolate* isolate);
 
   static Address current_next_address(Isolate* isolate);
   static Address current_limit_address(Isolate* isolate);
@@ -285,8 +318,6 @@ class HandleScope {
 
  private:
   // Prevent heap allocation or illegal handle scopes.
-  HandleScope(const HandleScope&);
-  void operator=(const HandleScope&);
   void* operator new(size_t size);
   void operator delete(void* size_t);
 
@@ -300,11 +331,11 @@ class HandleScope {
                                 Object** prev_limit);
 
   // Extend the handle scope making room for more handles.
-  static Object** Extend(Isolate* isolate);
+  V8_EXPORT_PRIVATE static Object** Extend(Isolate* isolate);
 
 #ifdef ENABLE_HANDLE_ZAPPING
   // Zaps the handles in the half-open interval [start, end).
-  static void ZapRange(Object** start, Object** end);
+  V8_EXPORT_PRIVATE static void ZapRange(Object** start, Object** end);
 #endif
 
   friend class v8::HandleScope;
@@ -312,11 +343,13 @@ class HandleScope {
   friend class DeferredHandleScope;
   friend class HandleScopeImplementer;
   friend class Isolate;
+
+  DISALLOW_COPY_AND_ASSIGN(HandleScope);
 };
 
 
 // Forward declarations for CanonicalHandleScope.
-template <typename V>
+template <typename V, class AllocationPolicy>
 class IdentityMap;
 class RootIndexMap;
 
@@ -326,7 +359,7 @@ class RootIndexMap;
 // This does not apply to nested inner HandleScopes unless a nested
 // CanonicalHandleScope is introduced. Handles are only canonicalized within
 // the same CanonicalHandleScope, but not across nested ones.
-class CanonicalHandleScope final {
+class V8_EXPORT_PRIVATE CanonicalHandleScope final {
  public:
   explicit CanonicalHandleScope(Isolate* isolate);
   ~CanonicalHandleScope();
@@ -337,7 +370,7 @@ class CanonicalHandleScope final {
   Isolate* isolate_;
   Zone zone_;
   RootIndexMap* root_index_map_;
-  IdentityMap<Object**>* identity_map_;
+  IdentityMap<Object**, ZoneAllocationPolicy>* identity_map_;
   // Ordinary nested handle scopes within the current one are not canonical.
   int canonical_level_;
   // We may have nested canonical scopes. Handles are canonical within each one.
@@ -346,8 +379,27 @@ class CanonicalHandleScope final {
   friend class HandleScope;
 };
 
-
-class DeferredHandleScope final {
+// A DeferredHandleScope is a HandleScope in which handles are not destroyed
+// when the DeferredHandleScope is left. Instead the DeferredHandleScope has to
+// be detached with {Detach}, and the result of {Detach} has to be destroyed
+// explicitly. A DeferredHandleScope should only be used with the following
+// design pattern:
+// 1) Open a HandleScope (not a DeferredHandleScope).
+//    HandleScope scope(isolate_);
+// 2) Create handles.
+//    Handle<Object> h1 = handle(object1, isolate);
+//    Handle<Object> h2 = handle(object2, isolate);
+// 3) Open a DeferredHandleScope.
+//    DeferredHandleScope deferred_scope(isolate);
+// 4) Reopen handles which should be in the DeferredHandleScope, e.g only h1.
+//    h1 = handle(*h1, isolate);
+// 5) Detach the DeferredHandleScope.
+//    DeferredHandles* deferred_handles = deferred_scope.Detach();
+// 6) Destroy the deferred handles.
+//    delete deferred_handles;
+//
+// Note: A DeferredHandleScope must not be opened within a DeferredHandleScope.
+class V8_EXPORT_PRIVATE DeferredHandleScope final {
  public:
   explicit DeferredHandleScope(Isolate* isolate);
   // The DeferredHandles object returned stores the Handles created
@@ -362,7 +414,7 @@ class DeferredHandleScope final {
   HandleScopeImplementer* impl_;
 
 #ifdef DEBUG
-  bool handles_detached_;
+  bool handles_detached_ = false;
   int prev_level_;
 #endif
 
@@ -396,9 +448,9 @@ struct HandleScopeData final {
   CanonicalHandleScope* canonical_scope;
 
   void Initialize() {
-    next = limit = NULL;
+    next = limit = nullptr;
     sealed_level = level = 0;
-    canonical_scope = NULL;
+    canonical_scope = nullptr;
   }
 };
 

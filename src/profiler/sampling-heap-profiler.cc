@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <memory>
 #include "src/api.h"
+#include "src/base/ieee754.h"
 #include "src/base/utils/random-number-generator.h"
 #include "src/frames-inl.h"
 #include "src/heap/heap.h"
@@ -16,38 +17,66 @@
 namespace v8 {
 namespace internal {
 
-SamplingHeapProfiler::SamplingHeapProfiler(Heap* heap, StringsStorage* names,
-                                           uint64_t rate, int stack_depth)
-    : InlineAllocationObserver(GetNextSampleInterval(
-          heap->isolate()->random_number_generator(), rate)),
-      isolate_(heap->isolate()),
+// We sample with a Poisson process, with constant average sampling interval.
+// This follows the exponential probability distribution with parameter
+// λ = 1/rate where rate is the average number of bytes between samples.
+//
+// Let u be a uniformly distributed random number between 0 and 1, then
+// next_sample = (- ln u) / λ
+intptr_t SamplingAllocationObserver::GetNextSampleInterval(uint64_t rate) {
+  if (FLAG_sampling_heap_profiler_suppress_randomness) {
+    return static_cast<intptr_t>(rate);
+  }
+  double u = random_->NextDouble();
+  double next = (-base::ieee754::log(u)) * rate;
+  return next < kPointerSize
+             ? kPointerSize
+             : (next > INT_MAX ? INT_MAX : static_cast<intptr_t>(next));
+}
+
+// Samples were collected according to a poisson process. Since we have not
+// recorded all allocations, we must approximate the shape of the underlying
+// space of allocations based on the samples we have collected. Given that
+// we sample at rate R, the probability that an allocation of size S will be
+// sampled is 1-exp(-S/R). This function uses the above probability to
+// approximate the true number of allocations with size *size* given that
+// *count* samples were observed.
+v8::AllocationProfile::Allocation SamplingHeapProfiler::ScaleSample(
+    size_t size, unsigned int count) {
+  double scale = 1.0 / (1.0 - std::exp(-static_cast<double>(size) / rate_));
+  // Round count instead of truncating.
+  return {size, static_cast<unsigned int>(count * scale + 0.5)};
+}
+
+SamplingHeapProfiler::SamplingHeapProfiler(
+    Heap* heap, StringsStorage* names, uint64_t rate, int stack_depth,
+    v8::HeapProfiler::SamplingFlags flags)
+    : isolate_(heap->isolate()),
       heap_(heap),
-      random_(isolate_->random_number_generator()),
+      new_space_observer_(new SamplingAllocationObserver(
+          heap_, static_cast<intptr_t>(rate), rate, this,
+          heap->isolate()->random_number_generator())),
+      other_spaces_observer_(new SamplingAllocationObserver(
+          heap_, static_cast<intptr_t>(rate), rate, this,
+          heap->isolate()->random_number_generator())),
       names_(names),
+      profile_root_(nullptr, "(root)", v8::UnboundScript::kNoScriptId, 0),
       samples_(),
+      stack_depth_(stack_depth),
       rate_(rate),
-      stack_depth_(stack_depth) {
-  heap->new_space()->AddInlineAllocationObserver(this);
+      flags_(flags) {
+  CHECK_GT(rate_, 0u);
+
+  heap_->AddAllocationObserversToAllSpaces(other_spaces_observer_.get(),
+                                           new_space_observer_.get());
 }
 
 
 SamplingHeapProfiler::~SamplingHeapProfiler() {
-  heap_->new_space()->RemoveInlineAllocationObserver(this);
+  heap_->RemoveAllocationObserversFromAllSpaces(other_spaces_observer_.get(),
+                                                new_space_observer_.get());
 
-  // Clear samples and drop all the weak references we are keeping.
-  std::set<SampledAllocation*>::iterator it;
-  for (it = samples_.begin(); it != samples_.end(); ++it) {
-    delete *it;
-  }
-  std::set<SampledAllocation*> empty;
-  samples_.swap(empty);
-}
-
-void SamplingHeapProfiler::Step(int bytes_allocated, Address soon_object,
-                                size_t size) {
-  DCHECK(heap_->gc_state() == Heap::NOT_IN_GC);
-  DCHECK(soon_object);
-  SampleObject(soon_object, size);
+  samples_.clear();
 }
 
 
@@ -60,87 +89,100 @@ void SamplingHeapProfiler::SampleObject(Address soon_object, size_t size) {
 
   // Mark the new block as FreeSpace to make sure the heap is iterable while we
   // are taking the sample.
-  heap()->CreateFillerObjectAt(soon_object, static_cast<int>(size));
+  heap()->CreateFillerObjectAt(soon_object, static_cast<int>(size),
+                               ClearRecordedSlots::kNo);
 
   Local<v8::Value> loc = v8::Utils::ToLocal(obj);
 
-  SampledAllocation* sample =
-      new SampledAllocation(this, isolate_, loc, size, stack_depth_);
-  samples_.insert(sample);
+  AllocationNode* node = AddStack();
+  node->allocations_[size]++;
+  Sample* sample = new Sample(size, node, loc, this);
+  samples_.emplace(sample);
+  sample->global.SetWeak(sample, OnWeakCallback, WeakCallbackType::kParameter);
+  sample->global.MarkIndependent();
 }
 
-
-// We sample with a Poisson process, with constant average sampling interval.
-// This follows the exponential probability distribution with parameter
-// λ = 1/rate where rate is the average number of bytes between samples.
-//
-// Let u be a uniformly distributed random number between 0 and 1, then
-// next_sample = (- ln u) / λ
-intptr_t SamplingHeapProfiler::GetNextSampleInterval(
-    base::RandomNumberGenerator* random, uint64_t rate) {
-  if (FLAG_sampling_heap_profiler_suppress_randomness) {
-    return rate;
-  }
-  double u = random->NextDouble();
-  double next = (-std::log(u)) * rate;
-  return next < kPointerSize
-             ? kPointerSize
-             : (next > INT_MAX ? INT_MAX : static_cast<intptr_t>(next));
-}
-
-
-void SamplingHeapProfiler::SampledAllocation::OnWeakCallback(
-    const WeakCallbackInfo<SampledAllocation>& data) {
-  SampledAllocation* sample = data.GetParameter();
-  sample->sampling_heap_profiler_->samples_.erase(sample);
-  delete sample;
-}
-
-
-SamplingHeapProfiler::FunctionInfo::FunctionInfo(SharedFunctionInfo* shared,
-                                                 StringsStorage* names)
-    : name_(names->GetFunctionName(shared->DebugName())),
-      script_name_(""),
-      script_id_(v8::UnboundScript::kNoScriptId),
-      start_position_(shared->start_position()) {
-  if (shared->script()->IsScript()) {
-    Script* script = Script::cast(shared->script());
-    script_id_ = script->id();
-    if (script->name()->IsName()) {
-      Name* name = Name::cast(script->name());
-      script_name_ = names->GetName(name);
+void SamplingHeapProfiler::OnWeakCallback(
+    const WeakCallbackInfo<Sample>& data) {
+  Sample* sample = data.GetParameter();
+  AllocationNode* node = sample->owner;
+  DCHECK_GT(node->allocations_[sample->size], 0);
+  node->allocations_[sample->size]--;
+  if (node->allocations_[sample->size] == 0) {
+    node->allocations_.erase(sample->size);
+    while (node->allocations_.empty() && node->children_.empty() &&
+           node->parent_ && !node->parent_->pinned_) {
+      AllocationNode* parent = node->parent_;
+      AllocationNode::FunctionId id = AllocationNode::function_id(
+          node->script_id_, node->script_position_, node->name_);
+      parent->children_.erase(id);
+      delete node;
+      node = parent;
     }
   }
+  auto it = std::find_if(sample->profiler->samples_.begin(),
+                         sample->profiler->samples_.end(),
+                         [&sample](const std::unique_ptr<Sample>& s) {
+                           return s.get() == sample;
+                         });
+
+  sample->profiler->samples_.erase(it);
+  // sample is deleted because its unique ptr was erased from samples_.
 }
 
+SamplingHeapProfiler::AllocationNode*
+SamplingHeapProfiler::AllocationNode::FindOrAddChildNode(const char* name,
+                                                         int script_id,
+                                                         int start_position) {
+  FunctionId id = function_id(script_id, start_position, name);
+  auto it = children_.find(id);
+  if (it != children_.end()) {
+    DCHECK_EQ(strcmp(it->second->name_, name), 0);
+    return it->second;
+  }
+  auto child = new AllocationNode(this, name, script_id, start_position);
+  children_.insert(std::make_pair(id, child));
+  return child;
+}
 
-SamplingHeapProfiler::SampledAllocation::SampledAllocation(
-    SamplingHeapProfiler* sampling_heap_profiler, Isolate* isolate,
-    Local<Value> local, size_t size, int max_frames)
-    : sampling_heap_profiler_(sampling_heap_profiler),
-      global_(reinterpret_cast<v8::Isolate*>(isolate), local),
-      size_(size) {
-  global_.SetWeak(this, OnWeakCallback, WeakCallbackType::kParameter);
+SamplingHeapProfiler::AllocationNode* SamplingHeapProfiler::AddStack() {
+  AllocationNode* node = &profile_root_;
 
-  StackTraceFrameIterator it(isolate);
+  std::vector<SharedFunctionInfo*> stack;
+  JavaScriptFrameIterator it(isolate_);
   int frames_captured = 0;
-  while (!it.done() && frames_captured < max_frames) {
+  bool found_arguments_marker_frames = false;
+  while (!it.done() && frames_captured < stack_depth_) {
     JavaScriptFrame* frame = it.frame();
-    SharedFunctionInfo* shared = frame->function()->shared();
-    stack_.push_back(new FunctionInfo(shared, sampling_heap_profiler->names()));
-
-    frames_captured++;
+    // If we are materializing objects during deoptimization, inlined
+    // closures may not yet be materialized, and this includes the
+    // closure on the stack. Skip over any such frames (they'll be
+    // in the top frames of the stack). The allocations made in this
+    // sensitive moment belong to the formerly optimized frame anyway.
+    if (frame->unchecked_function()->IsJSFunction()) {
+      SharedFunctionInfo* shared = frame->function()->shared();
+      stack.push_back(shared);
+      frames_captured++;
+    } else {
+      found_arguments_marker_frames = true;
+    }
     it.Advance();
   }
 
   if (frames_captured == 0) {
     const char* name = nullptr;
-    switch (isolate->current_vm_state()) {
+    switch (isolate_->current_vm_state()) {
       case GC:
         name = "(GC)";
         break;
+      case PARSER:
+        name = "(PARSER)";
+        break;
       case COMPILER:
         name = "(COMPILER)";
+        break;
+      case BYTECODE_COMPILER:
+        name = "(BYTECODE_COMPILER)";
         break;
       case OTHER:
         name = "(V8 API)";
@@ -155,96 +197,96 @@ SamplingHeapProfiler::SampledAllocation::SampledAllocation(
         name = "(JS)";
         break;
     }
-    stack_.push_back(new FunctionInfo(name));
+    return node->FindOrAddChildNode(name, v8::UnboundScript::kNoScriptId, 0);
   }
-}
-
-
-SamplingHeapProfiler::Node* SamplingHeapProfiler::AllocateNode(
-    AllocationProfile* profile, const std::map<int, Script*>& scripts,
-    FunctionInfo* function_info) {
-  DCHECK(function_info->get_name());
-  DCHECK(function_info->get_script_name());
-
-  int line = v8::AllocationProfile::kNoLineNumberInfo;
-  int column = v8::AllocationProfile::kNoColumnNumberInfo;
-
-  if (function_info->get_script_id() != v8::UnboundScript::kNoScriptId) {
-    // Cannot use std::map<T>::at because it is not available on android.
-    auto non_const_scripts = const_cast<std::map<int, Script*>&>(scripts);
-    Handle<Script> script(non_const_scripts[function_info->get_script_id()]);
-
-    line =
-        1 + Script::GetLineNumber(script, function_info->get_start_position());
-    column = 1 + Script::GetColumnNumber(script,
-                                         function_info->get_start_position());
-  }
-
-  profile->nodes().push_back(
-      Node({ToApiHandle<v8::String>(isolate_->factory()->InternalizeUtf8String(
-                function_info->get_name())),
-            ToApiHandle<v8::String>(isolate_->factory()->InternalizeUtf8String(
-                function_info->get_script_name())),
-            function_info->get_script_id(), function_info->get_start_position(),
-            line, column, std::vector<Node*>(),
-            std::vector<v8::AllocationProfile::Allocation>()}));
-
-  return &profile->nodes().back();
-}
-
-
-SamplingHeapProfiler::Node* SamplingHeapProfiler::FindOrAddChildNode(
-    AllocationProfile* profile, const std::map<int, Script*>& scripts,
-    Node* parent, FunctionInfo* function_info) {
-  for (Node* child : parent->children) {
-    if (child->script_id == function_info->get_script_id() &&
-        child->start_position == function_info->get_start_position())
-      return child;
-  }
-  Node* child = AllocateNode(profile, scripts, function_info);
-  parent->children.push_back(child);
-  return child;
-}
-
-
-SamplingHeapProfiler::Node* SamplingHeapProfiler::AddStack(
-    AllocationProfile* profile, const std::map<int, Script*>& scripts,
-    const std::vector<FunctionInfo*>& stack) {
-  Node* node = profile->GetRootNode();
 
   // We need to process the stack in reverse order as the top of the stack is
   // the first element in the list.
   for (auto it = stack.rbegin(); it != stack.rend(); ++it) {
-    FunctionInfo* function_info = *it;
-    node = FindOrAddChildNode(profile, scripts, node, function_info);
+    SharedFunctionInfo* shared = *it;
+    const char* name = this->names()->GetName(shared->DebugName());
+    int script_id = v8::UnboundScript::kNoScriptId;
+    if (shared->script()->IsScript()) {
+      Script* script = Script::cast(shared->script());
+      script_id = script->id();
+    }
+    node = node->FindOrAddChildNode(name, script_id, shared->StartPosition());
   }
+
+  if (found_arguments_marker_frames) {
+    node =
+        node->FindOrAddChildNode("(deopt)", v8::UnboundScript::kNoScriptId, 0);
+  }
+
   return node;
 }
 
-
-v8::AllocationProfile* SamplingHeapProfiler::GetAllocationProfile() {
-  // To resolve positions to line/column numbers, we will need to look up
-  // scripts. Build a map to allow fast mapping from script id to script.
-  std::map<int, Script*> scripts;
-  {
-    Script::Iterator iterator(isolate_);
-    Script* script;
-    while ((script = iterator.Next())) {
-      scripts[script->id()] = script;
+v8::AllocationProfile::Node* SamplingHeapProfiler::TranslateAllocationNode(
+    AllocationProfile* profile, SamplingHeapProfiler::AllocationNode* node,
+    const std::map<int, Handle<Script>>& scripts) {
+  // By pinning the node we make sure its children won't get disposed if
+  // a GC kicks in during the tree retrieval.
+  node->pinned_ = true;
+  Local<v8::String> script_name =
+      ToApiHandle<v8::String>(isolate_->factory()->InternalizeUtf8String(""));
+  int line = v8::AllocationProfile::kNoLineNumberInfo;
+  int column = v8::AllocationProfile::kNoColumnNumberInfo;
+  std::vector<v8::AllocationProfile::Allocation> allocations;
+  allocations.reserve(node->allocations_.size());
+  if (node->script_id_ != v8::UnboundScript::kNoScriptId &&
+      scripts.find(node->script_id_) != scripts.end()) {
+    // Cannot use std::map<T>::at because it is not available on android.
+    auto non_const_scripts =
+        const_cast<std::map<int, Handle<Script>>&>(scripts);
+    Handle<Script> script = non_const_scripts[node->script_id_];
+    if (!script.is_null()) {
+      if (script->name()->IsName()) {
+        Name* name = Name::cast(script->name());
+        script_name = ToApiHandle<v8::String>(
+            isolate_->factory()->InternalizeUtf8String(names_->GetName(name)));
+      }
+      line = 1 + Script::GetLineNumber(script, node->script_position_);
+      column = 1 + Script::GetColumnNumber(script, node->script_position_);
     }
   }
-
-  auto profile = new v8::internal::AllocationProfile();
-
-  // Create the root node.
-  FunctionInfo function_info("(root)");
-  AllocateNode(profile, scripts, &function_info);
-
-  for (SampledAllocation* allocation : samples_) {
-    Node* node = AddStack(profile, scripts, allocation->get_stack());
-    node->allocations.push_back({allocation->get_size(), 1});
+  for (auto alloc : node->allocations_) {
+    allocations.push_back(ScaleSample(alloc.first, alloc.second));
   }
 
+  profile->nodes().push_back(v8::AllocationProfile::Node(
+      {ToApiHandle<v8::String>(
+           isolate_->factory()->InternalizeUtf8String(node->name_)),
+       script_name, node->script_id_, node->script_position_, line, column,
+       std::vector<v8::AllocationProfile::Node*>(), allocations}));
+  v8::AllocationProfile::Node* current = &profile->nodes().back();
+  // The children map may have nodes inserted into it during translation
+  // because the translation may allocate strings on the JS heap that have
+  // the potential to be sampled. That's ok since map iterators are not
+  // invalidated upon std::map insertion.
+  for (auto it : node->children_) {
+    current->children.push_back(
+        TranslateAllocationNode(profile, it.second, scripts));
+  }
+  node->pinned_ = false;
+  return current;
+}
+
+v8::AllocationProfile* SamplingHeapProfiler::GetAllocationProfile() {
+  if (flags_ & v8::HeapProfiler::kSamplingForceGC) {
+    isolate_->heap()->CollectAllGarbage(
+        Heap::kNoGCFlags, GarbageCollectionReason::kSamplingProfiler);
+  }
+  // To resolve positions to line/column numbers, we will need to look up
+  // scripts. Build a map to allow fast mapping from script id to script.
+  std::map<int, Handle<Script>> scripts;
+  {
+    Script::Iterator iterator(isolate_);
+    while (Script* script = iterator.Next()) {
+      scripts[script->id()] = handle(script, isolate_);
+    }
+  }
+  auto profile = new v8::internal::AllocationProfile();
+  TranslateAllocationNode(profile, &profile_root_, scripts);
   return profile;
 }
 

@@ -2,211 +2,291 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef V8_WASM_MODULE_H_
-#define V8_WASM_MODULE_H_
+#ifndef V8_WASM_WASM_MODULE_H_
+#define V8_WASM_WASM_MODULE_H_
 
-#include "src/wasm/wasm-opcodes.h"
-#include "src/wasm/wasm-result.h"
+#include <memory>
 
-#include "src/api.h"
+#include "src/globals.h"
 #include "src/handles.h"
+#include "src/wasm/decoder.h"
+#include "src/wasm/signature-map.h"
+#include "src/wasm/wasm-constants.h"
+#include "src/wasm/wasm-opcodes.h"
 
 namespace v8 {
 namespace internal {
 
-namespace compiler {
-class CallDescriptor;
-}
+class WasmDebugInfo;
+class WasmModuleObject;
 
 namespace wasm {
-const size_t kMaxModuleSize = 1024 * 1024 * 1024;
-const size_t kMaxFunctionSize = 128 * 1024;
-const size_t kMaxStringSize = 256;
 
-enum WasmSectionDeclCode {
-  kDeclMemory = 0x00,
-  kDeclSignatures = 0x01,
-  kDeclFunctions = 0x02,
-  kDeclGlobals = 0x03,
-  kDeclDataSegments = 0x04,
-  kDeclFunctionTable = 0x05,
-  kDeclWLL = 0x11,
-  kDeclEnd = 0x06,
-};
-
-static const int kMaxModuleSectionCode = 6;
-
-enum WasmFunctionDeclBit {
-  kDeclFunctionName = 0x01,
-  kDeclFunctionImport = 0x02,
-  kDeclFunctionLocals = 0x04,
-  kDeclFunctionExport = 0x08
-};
-
-// Constants for fixed-size elements within a module.
-static const size_t kDeclMemorySize = 3;
-static const size_t kDeclGlobalSize = 6;
-static const size_t kDeclDataSegmentSize = 13;
+class ErrorThrower;
 
 // Static representation of a wasm function.
 struct WasmFunction {
   FunctionSig* sig;      // signature of the function.
-  uint16_t sig_index;    // index into the signature table.
-  uint32_t name_offset;  // offset in the module bytes of the name, if any.
-  uint32_t code_start_offset;    // offset in the module bytes of code start.
-  uint32_t code_end_offset;      // offset in the module bytes of code end.
-  uint16_t local_i32_count;      // number of i32 local variables.
-  uint16_t local_i64_count;      // number of i64 local variables.
-  uint16_t local_f32_count;      // number of f32 local variables.
-  uint16_t local_f64_count;      // number of f64 local variables.
-  bool exported;                 // true if this function is exported.
-  bool external;  // true if this function is externally supplied.
+  uint32_t func_index;   // index into the function table.
+  uint32_t sig_index;    // index into the signature table.
+  WireBytesRef code;     // code of this function.
+  bool imported;
+  bool exported;
 };
-
-struct ModuleEnv;  // forward declaration of decoder interface.
 
 // Static representation of a wasm global variable.
 struct WasmGlobal {
-  uint32_t name_offset;  // offset in the module bytes of the name, if any.
-  MachineType type;      // type of the global.
-  uint32_t offset;       // offset from beginning of globals area.
-  bool exported;         // true if this global is exported.
+  ValueType type;     // type of the global.
+  bool mutability;    // {true} if mutable.
+  WasmInitExpr init;  // the initialization expression of the global.
+  union {
+    uint32_t index;   // index of imported mutable global.
+    uint32_t offset;  // offset into global memory (if not imported & mutable).
+  };
+  bool imported;  // true if imported.
+  bool exported;  // true if exported.
+};
+
+// Note: An exception signature only uses the params portion of a
+// function signature.
+typedef FunctionSig WasmExceptionSig;
+
+struct WasmException {
+  explicit WasmException(const WasmExceptionSig* sig = &empty_sig_)
+      : sig(sig) {}
+  FunctionSig* ToFunctionSig() const { return const_cast<FunctionSig*>(sig); }
+
+  const WasmExceptionSig* sig;  // type signature of the exception.
+
+  // Used to hold data on runtime exceptions.
+  static constexpr const char* kRuntimeIdStr = "WasmExceptionRuntimeId";
+  static constexpr const char* kRuntimeValuesStr = "WasmExceptionValues";
+
+ private:
+  static const WasmExceptionSig empty_sig_;
 };
 
 // Static representation of a wasm data segment.
 struct WasmDataSegment {
-  uint32_t dest_addr;      // destination memory address of the data.
-  uint32_t source_offset;  // start offset in the module bytes.
-  uint32_t source_size;    // end offset in the module bytes.
-  bool init;               // true if loaded upon instantiation.
+  WasmInitExpr dest_addr;  // destination memory address of the data.
+  WireBytesRef source;     // start offset in the module bytes.
 };
+
+// Static representation of a wasm indirect call table.
+struct WasmIndirectFunctionTable {
+  MOVE_ONLY_WITH_DEFAULT_CONSTRUCTORS(WasmIndirectFunctionTable);
+
+  uint32_t initial_size = 0;      // initial table size.
+  uint32_t maximum_size = 0;      // maximum table size.
+  bool has_maximum_size = false;  // true if there is a maximum size.
+  // TODO(titzer): Move this to WasmInstance. Needed by interpreter only.
+  std::vector<int32_t> values;  // function table, -1 indicating invalid.
+  bool imported = false;        // true if imported.
+  bool exported = false;        // true if exported.
+};
+
+// Static representation of how to initialize a table.
+struct WasmTableInit {
+  MOVE_ONLY_NO_DEFAULT_CONSTRUCTOR(WasmTableInit);
+
+  WasmTableInit(uint32_t table_index, WasmInitExpr offset)
+      : table_index(table_index), offset(offset) {}
+
+  uint32_t table_index;
+  WasmInitExpr offset;
+  std::vector<uint32_t> entries;
+};
+
+// Static representation of a wasm import.
+struct WasmImport {
+  WireBytesRef module_name;  // module name.
+  WireBytesRef field_name;   // import name.
+  ImportExportKindCode kind;  // kind of the import.
+  uint32_t index;            // index into the respective space.
+};
+
+// Static representation of a wasm export.
+struct WasmExport {
+  WireBytesRef name;      // exported name.
+  ImportExportKindCode kind;  // kind of the export.
+  uint32_t index;         // index into the respective space.
+};
+
+enum ModuleOrigin : uint8_t { kWasmOrigin, kAsmJsOrigin };
+
+#define SELECT_WASM_COUNTER(counters, origin, prefix, suffix)           \
+  ((origin) == wasm::kWasmOrigin ? (counters)->prefix##_wasm_##suffix() \
+                                 : (counters)->prefix##_asm_##suffix())
+
+struct ModuleWireBytes;
 
 // Static representation of a module.
-struct WasmModule {
-  static const uint8_t kMinMemSize = 12;  // Minimum memory size = 4kb
-  static const uint8_t kMaxMemSize = 30;  // Maximum memory size = 1gb
+struct V8_EXPORT_PRIVATE WasmModule {
+  MOVE_ONLY_NO_DEFAULT_CONSTRUCTOR(WasmModule);
 
-  Isolate* shared_isolate;    // isolate for storing shared code.
-  const byte* module_start;   // starting address for the module bytes.
-  const byte* module_end;     // end address for the module bytes.
-  uint8_t min_mem_size_log2;  // minimum size of the memory (log base 2).
-  uint8_t max_mem_size_log2;  // maximum size of the memory (log base 2).
-  bool mem_export;            // true if the memory is exported.
-  bool mem_external;          // true if the memory is external.
+  std::unique_ptr<Zone> signature_zone;
+  uint32_t initial_pages = 0;      // initial size of the memory in 64k pages
+  uint32_t maximum_pages = 0;      // maximum size of the memory in 64k pages
+  bool has_shared_memory = false;  // true if memory is a SharedArrayBuffer
+  bool has_maximum_pages = false;  // true if there is a maximum memory size
+  bool has_memory = false;         // true if the memory was defined or imported
+  bool mem_export = false;         // true if the memory is exported
+  int start_function_index = -1;   // start function, >= 0 if any
 
-  std::vector<WasmGlobal>* globals;             // globals in this module.
-  std::vector<FunctionSig*>* signatures;        // signatures in this module.
-  std::vector<WasmFunction>* functions;         // functions in this module.
-  std::vector<WasmDataSegment>* data_segments;  // data segments in this module.
-  std::vector<uint16_t>* function_table;        // function table.
+  std::vector<WasmGlobal> globals;
+  // Size of the buffer required for all globals that are not imported and
+  // mutable.
+  uint32_t globals_buffer_size = 0;
+  uint32_t num_imported_mutable_globals = 0;
+  uint32_t num_imported_functions = 0;
+  uint32_t num_declared_functions = 0;  // excluding imported
+  uint32_t num_exported_functions = 0;
+  WireBytesRef name = {0, 0};
+  std::vector<FunctionSig*> signatures;  // by signature index
+  std::vector<uint32_t> signature_ids;   // by signature index
+  std::vector<WasmFunction> functions;
+  std::vector<WasmDataSegment> data_segments;
+  std::vector<WasmIndirectFunctionTable> function_tables;
+  std::vector<WasmImport> import_table;
+  std::vector<WasmExport> export_table;
+  std::vector<WasmException> exceptions;
+  std::vector<WasmTableInit> table_inits;
+  SignatureMap signature_map;  // canonicalizing map for signature indexes.
 
-  WasmModule();
-  ~WasmModule();
+  ModuleOrigin origin = kWasmOrigin;  // origin of the module
+  mutable std::unique_ptr<std::unordered_map<uint32_t, WireBytesRef>>
+      function_names;
 
-  // Get a pointer to a string stored in the module bytes representing a name.
-  const char* GetName(uint32_t offset) {
-    if (offset == 0) return "<?>";  // no name.
-    CHECK(BoundsCheck(offset, offset + 1));
-    return reinterpret_cast<const char*>(module_start + offset);
+  WasmModule() : WasmModule(nullptr) {}
+  WasmModule(std::unique_ptr<Zone> owned);
+
+  WireBytesRef LookupFunctionName(const ModuleWireBytes& wire_bytes,
+                                  uint32_t function_index) const;
+  void AddFunctionNameForTesting(int function_index, WireBytesRef name);
+};
+
+size_t EstimateWasmModuleSize(const WasmModule* module);
+
+// Interface to the storage (wire bytes) of a wasm module.
+// It is illegal for anyone receiving a ModuleWireBytes to store pointers based
+// on module_bytes, as this storage is only guaranteed to be alive as long as
+// this struct is alive.
+struct V8_EXPORT_PRIVATE ModuleWireBytes {
+  ModuleWireBytes(Vector<const byte> module_bytes)
+      : module_bytes_(module_bytes) {}
+  ModuleWireBytes(const byte* start, const byte* end)
+      : module_bytes_(start, static_cast<int>(end - start)) {
+    DCHECK_GE(kMaxInt, end - start);
   }
+
+  // Get a string stored in the module bytes representing a name.
+  WasmName GetName(WireBytesRef ref) const;
+
+  // Get a string stored in the module bytes representing a function name.
+  WasmName GetName(const WasmFunction* function,
+                   const WasmModule* module) const;
+
+  // Get a string stored in the module bytes representing a name.
+  WasmName GetNameOrNull(WireBytesRef ref) const;
+
+  // Get a string stored in the module bytes representing a function name.
+  WasmName GetNameOrNull(const WasmFunction* function,
+                         const WasmModule* module) const;
 
   // Checks the given offset range is contained within the module bytes.
-  bool BoundsCheck(uint32_t start, uint32_t end) {
-    size_t size = module_end - module_start;
-    return start < size && end < size;
+  bool BoundsCheck(uint32_t offset, uint32_t length) const {
+    uint32_t size = static_cast<uint32_t>(module_bytes_.length());
+    return offset <= size && length <= size - offset;
   }
 
-  // Creates a new instantiation of the module in the given isolate.
-  MaybeHandle<JSObject> Instantiate(Isolate* isolate, Handle<JSObject> ffi,
-                                    Handle<JSArrayBuffer> memory);
+  Vector<const byte> GetFunctionBytes(const WasmFunction* function) const {
+    return module_bytes_.SubVector(function->code.offset(),
+                                   function->code.end_offset());
+  }
+
+  Vector<const byte> module_bytes() const { return module_bytes_; }
+  const byte* start() const { return module_bytes_.start(); }
+  const byte* end() const { return module_bytes_.end(); }
+  size_t length() const { return module_bytes_.length(); }
+
+ private:
+  Vector<const byte> module_bytes_;
 };
 
-// An instantiated WASM module, including memory, function table, etc.
-struct WasmModuleInstance {
-  WasmModule* module;  // static representation of the module.
-  // -- Heap allocated --------------------------------------------------------
-  Handle<JSObject> js_object;            // JavaScript module object.
-  Handle<Context> context;               // JavaScript native context.
-  Handle<JSArrayBuffer> mem_buffer;      // Handle to array buffer of memory.
-  Handle<JSArrayBuffer> globals_buffer;  // Handle to array buffer of globals.
-  Handle<FixedArray> function_table;     // indirect function table.
-  std::vector<Handle<Code>>* function_code;  // code objects for each function.
-  // -- raw memory ------------------------------------------------------------
-  byte* mem_start;  // start of linear memory.
-  size_t mem_size;  // size of the linear memory.
-  // -- raw globals -----------------------------------------------------------
-  byte* globals_start;  // start of the globals area.
-  size_t globals_size;  // size of the globals area.
+// A helper for printing out the names of functions.
+struct WasmFunctionName {
+  WasmFunctionName(const WasmFunction* function, WasmName name)
+      : function_(function), name_(name) {}
 
-  explicit WasmModuleInstance(WasmModule* m)
-      : module(m),
-        function_code(nullptr),
-        mem_start(nullptr),
-        mem_size(0),
-        globals_start(nullptr),
-        globals_size(0) {}
+  const WasmFunction* function_;
+  const WasmName name_;
 };
 
-// forward declaration.
-class WasmLinker;
+std::ostream& operator<<(std::ostream& os, const WasmFunctionName& name);
 
-// Interface provided to the decoder/graph builder which contains only
-// minimal information about the globals, functions, and function tables.
-struct ModuleEnv {
-  WasmModule* module;
-  WasmModuleInstance* instance;
-  WasmLinker* linker;
-  bool asm_js;  // true if the module originated from asm.js.
+// Get the debug info associated with the given wasm object.
+// If no debug info exists yet, it is created automatically.
+Handle<WasmDebugInfo> GetDebugInfo(Handle<JSObject> wasm);
 
-  bool IsValidGlobal(uint32_t index) {
-    return module && index < module->globals->size();
-  }
-  bool IsValidFunction(uint32_t index) {
-    return module && index < module->functions->size();
-  }
-  bool IsValidSignature(uint32_t index) {
-    return module && index < module->signatures->size();
-  }
-  MachineType GetGlobalType(uint32_t index) {
-    DCHECK(IsValidGlobal(index));
-    return module->globals->at(index).type;
-  }
-  FunctionSig* GetFunctionSignature(uint32_t index) {
-    DCHECK(IsValidFunction(index));
-    return module->functions->at(index).sig;
-  }
-  FunctionSig* GetSignature(uint32_t index) {
-    DCHECK(IsValidSignature(index));
-    return module->signatures->at(index);
-  }
-  size_t FunctionTableSize() {
-    return module && module->function_table ? module->function_table->size()
-                                            : 0;
+V8_EXPORT_PRIVATE MaybeHandle<WasmModuleObject> CreateModuleObjectFromBytes(
+    Isolate* isolate, const byte* start, const byte* end, ErrorThrower* thrower,
+    ModuleOrigin origin, Handle<Script> asm_js_script,
+    Vector<const byte> asm_offset_table);
+
+V8_EXPORT_PRIVATE bool IsWasmCodegenAllowed(Isolate* isolate,
+                                            Handle<Context> context);
+
+V8_EXPORT_PRIVATE Handle<JSArray> GetImports(Isolate* isolate,
+                                             Handle<WasmModuleObject> module);
+V8_EXPORT_PRIVATE Handle<JSArray> GetExports(Isolate* isolate,
+                                             Handle<WasmModuleObject> module);
+V8_EXPORT_PRIVATE Handle<JSArray> GetCustomSections(
+    Isolate* isolate, Handle<WasmModuleObject> module, Handle<String> name,
+    ErrorThrower* thrower);
+
+// Decode local variable names from the names section. Return FixedArray of
+// FixedArray of <undefined|String>. The outer fixed array is indexed by the
+// function index, the inner one by the local index.
+Handle<FixedArray> DecodeLocalNames(Isolate*, Handle<WasmModuleObject>);
+
+// TruncatedUserString makes it easy to output names up to a certain length, and
+// output a truncation followed by '...' if they exceed a limit.
+// Use like this:
+//   TruncatedUserString<> name (pc, len);
+//   printf("... %.*s ...", name.length(), name.start())
+template <int kMaxLen = 50>
+class TruncatedUserString {
+  static_assert(kMaxLen >= 4, "minimum length is 4 (length of '...' plus one)");
+
+ public:
+  template <typename T>
+  explicit TruncatedUserString(Vector<T> name)
+      : TruncatedUserString(name.start(), name.length()) {}
+
+  TruncatedUserString(const byte* start, size_t len)
+      : TruncatedUserString(reinterpret_cast<const char*>(start), len) {}
+
+  TruncatedUserString(const char* start, size_t len)
+      : start_(start), length_(std::min(kMaxLen, static_cast<int>(len))) {
+    if (len > static_cast<size_t>(kMaxLen)) {
+      memcpy(buffer_, start, kMaxLen - 3);
+      memset(buffer_ + kMaxLen - 3, '.', 3);
+      start_ = buffer_;
+    }
   }
 
-  Handle<Code> GetFunctionCode(uint32_t index);
-  Handle<FixedArray> GetFunctionTable();
+  const char* start() const { return start_; }
 
-  compiler::CallDescriptor* GetWasmCallDescriptor(Zone* zone, FunctionSig* sig);
-  compiler::CallDescriptor* GetCallDescriptor(Zone* zone, uint32_t index);
+  int length() const { return length_; }
+
+ private:
+  const char* start_;
+  const int length_;
+  char buffer_[kMaxLen];
 };
 
-std::ostream& operator<<(std::ostream& os, const WasmModule& module);
-std::ostream& operator<<(std::ostream& os, const WasmFunction& function);
-
-typedef Result<WasmModule*> ModuleResult;
-typedef Result<WasmFunction*> FunctionResult;
-
-// For testing. Decode, verify, and run the last exported function in the
-// given encoded module.
-int32_t CompileAndRunWasmModule(Isolate* isolate, const byte* module_start,
-                                const byte* module_end, bool asm_js = false);
-
-// For testing. Decode, verify, and run the last exported function in the
-// given decoded module.
-int32_t CompileAndRunWasmModule(Isolate* isolate, WasmModule* module);
 }  // namespace wasm
 }  // namespace internal
 }  // namespace v8
 
-#endif  // V8_WASM_MODULE_H_
+#endif  // V8_WASM_WASM_MODULE_H_

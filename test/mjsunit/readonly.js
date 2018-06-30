@@ -25,7 +25,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Flags: --allow-natives-syntax --harmony-proxies
+// Flags: --allow-natives-syntax
 
 // Different ways to create an object.
 
@@ -173,8 +173,8 @@ function TestAllScenarios(f) {
       // Make sure that the assignments are monomorphic.
       %DeoptimizeFunction(Assign);
       %DeoptimizeFunction(AssignStrict);
-      %ClearFunctionTypeFeedback(Assign);
-      %ClearFunctionTypeFeedback(AssignStrict);
+      %ClearFunctionFeedback(Assign);
+      %ClearFunctionFeedback(AssignStrict);
       for (var i = 0; i < t; ++i) {
         var o = create();
         assertFalse("a" in o && !("a" in o.__proto__));

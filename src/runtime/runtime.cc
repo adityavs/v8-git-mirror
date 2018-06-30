@@ -4,13 +4,13 @@
 
 #include "src/runtime/runtime.h"
 
-#include <iomanip>
-
 #include "src/assembler.h"
+#include "src/base/hashmap.h"
 #include "src/contexts.h"
 #include "src/handles-inl.h"
 #include "src/heap/heap.h"
 #include "src/isolate.h"
+#include "src/objects-inl.h"
 #include "src/runtime/runtime-utils.h"
 
 namespace v8 {
@@ -28,13 +28,6 @@ FOR_EACH_INTRINSIC_RETURN_OBJECT(F)
                             Isolate* isolate);
 FOR_EACH_INTRINSIC_RETURN_PAIR(P)
 #undef P
-
-#define T(name, number_of_args, result_size)                         \
-  ObjectTriple Runtime_##name(int args_length, Object** args_object, \
-                              Isolate* isolate);
-FOR_EACH_INTRINSIC_RETURN_TRIPLE(T)
-#undef T
-
 
 #define F(name, number_of_args, result_size)                                  \
   {                                                                           \
@@ -59,32 +52,96 @@ static const Runtime::Function kIntrinsicFunctions[] = {
 #undef I
 #undef F
 
+namespace {
 
-void Runtime::InitializeIntrinsicFunctionNames(Isolate* isolate,
-                                               Handle<NameDictionary> dict) {
-  DCHECK(dict->NumberOfElements() == 0);
-  HandleScope scope(isolate);
-  for (int i = 0; i < kNumFunctions; ++i) {
-    const char* name = kIntrinsicFunctions[i].name;
-    if (name == NULL) continue;
-    Handle<NameDictionary> new_dict = NameDictionary::Add(
-        dict, isolate->factory()->InternalizeUtf8String(name),
-        Handle<Smi>(Smi::FromInt(i), isolate), PropertyDetails::Empty());
-    // The dictionary does not need to grow.
-    CHECK(new_dict.is_identical_to(dict));
+V8_DECLARE_ONCE(initialize_function_name_map_once);
+static const base::CustomMatcherHashMap* kRuntimeFunctionNameMap;
+
+struct IntrinsicFunctionIdentifier {
+  IntrinsicFunctionIdentifier(const unsigned char* data, const int length)
+      : data_(data), length_(length) {}
+
+  static bool Match(void* key1, void* key2) {
+    const IntrinsicFunctionIdentifier* lhs =
+        static_cast<IntrinsicFunctionIdentifier*>(key1);
+    const IntrinsicFunctionIdentifier* rhs =
+        static_cast<IntrinsicFunctionIdentifier*>(key2);
+    if (lhs->length_ != rhs->length_) return false;
+    return CompareCharsUnsigned(reinterpret_cast<const uint8_t*>(lhs->data_),
+                                reinterpret_cast<const uint8_t*>(rhs->data_),
+                                rhs->length_) == 0;
+  }
+
+  uint32_t Hash() {
+    return StringHasher::HashSequentialString<uint8_t>(
+        data_, length_, v8::internal::kZeroHashSeed);
+  }
+
+  const unsigned char* data_;
+  const int length_;
+};
+
+void InitializeIntrinsicFunctionNames() {
+  base::CustomMatcherHashMap* function_name_map =
+      new base::CustomMatcherHashMap(IntrinsicFunctionIdentifier::Match);
+  for (size_t i = 0; i < arraysize(kIntrinsicFunctions); ++i) {
+    const Runtime::Function* function = &kIntrinsicFunctions[i];
+    IntrinsicFunctionIdentifier* identifier = new IntrinsicFunctionIdentifier(
+        reinterpret_cast<const unsigned char*>(function->name),
+        static_cast<int>(strlen(function->name)));
+    base::HashMap::Entry* entry =
+        function_name_map->InsertNew(identifier, identifier->Hash());
+    entry->value = const_cast<Runtime::Function*>(function);
+  }
+  kRuntimeFunctionNameMap = function_name_map;
+}
+
+}  // namespace
+
+bool Runtime::IsNonReturning(FunctionId id) {
+  switch (id) {
+    case Runtime::kThrowUnsupportedSuperError:
+    case Runtime::kThrowConstructorNonCallableError:
+    case Runtime::kThrowStaticPrototypeError:
+    case Runtime::kThrowSuperAlreadyCalledError:
+    case Runtime::kThrowSuperNotCalled:
+    case Runtime::kReThrow:
+    case Runtime::kThrow:
+    case Runtime::kThrowApplyNonFunction:
+    case Runtime::kThrowCalledNonCallable:
+    case Runtime::kThrowConstructedNonConstructable:
+    case Runtime::kThrowConstructorReturnedNonObject:
+    case Runtime::kThrowInvalidStringLength:
+    case Runtime::kThrowInvalidTypedArrayAlignment:
+    case Runtime::kThrowIteratorResultNotAnObject:
+    case Runtime::kThrowThrowMethodMissing:
+    case Runtime::kThrowSymbolIteratorInvalid:
+    case Runtime::kThrowNotConstructor:
+    case Runtime::kThrowRangeError:
+    case Runtime::kThrowReferenceError:
+    case Runtime::kThrowStackOverflow:
+    case Runtime::kThrowSymbolAsyncIteratorInvalid:
+    case Runtime::kThrowTypeError:
+    case Runtime::kThrowConstAssignError:
+    case Runtime::kThrowWasmError:
+    case Runtime::kThrowWasmStackOverflow:
+      return true;
+    default:
+      return false;
   }
 }
 
-
-const Runtime::Function* Runtime::FunctionForName(Handle<String> name) {
-  Heap* heap = name->GetHeap();
-  int entry = heap->intrinsic_function_names()->FindEntry(name);
-  if (entry != kNotFound) {
-    Object* smi_index = heap->intrinsic_function_names()->ValueAt(entry);
-    int function_index = Smi::cast(smi_index)->value();
-    return &(kIntrinsicFunctions[function_index]);
+const Runtime::Function* Runtime::FunctionForName(const unsigned char* name,
+                                                  int length) {
+  base::CallOnce(&initialize_function_name_map_once,
+                 &InitializeIntrinsicFunctionNames);
+  IntrinsicFunctionIdentifier identifier(name, length);
+  base::HashMap::Entry* entry =
+      kRuntimeFunctionNameMap->Lookup(&identifier, identifier.Hash());
+  if (entry) {
+    return reinterpret_cast<Function*>(entry->value);
   }
-  return NULL;
+  return nullptr;
 }
 
 
@@ -94,7 +151,7 @@ const Runtime::Function* Runtime::FunctionForEntry(Address entry) {
       return &(kIntrinsicFunctions[i]);
     }
   }
-  return NULL;
+  return nullptr;
 }
 
 
@@ -102,110 +159,34 @@ const Runtime::Function* Runtime::FunctionForId(Runtime::FunctionId id) {
   return &(kIntrinsicFunctions[static_cast<int>(id)]);
 }
 
-
 const Runtime::Function* Runtime::RuntimeFunctionTable(Isolate* isolate) {
-  if (isolate->external_reference_redirector()) {
-    // When running with the simulator we need to provide a table which has
-    // redirected runtime entry addresses.
-    if (!isolate->runtime_state()->redirected_intrinsic_functions()) {
-      size_t function_count = arraysize(kIntrinsicFunctions);
-      Function* redirected_functions = new Function[function_count];
-      memcpy(redirected_functions, kIntrinsicFunctions,
-             sizeof(kIntrinsicFunctions));
-      for (size_t i = 0; i < function_count; i++) {
-        ExternalReference redirected_entry(static_cast<Runtime::FunctionId>(i),
-                                           isolate);
-        redirected_functions[i].entry = redirected_entry.address();
-      }
-      isolate->runtime_state()->set_redirected_intrinsic_functions(
-          redirected_functions);
+#ifdef USE_SIMULATOR
+  // When running with the simulator we need to provide a table which has
+  // redirected runtime entry addresses.
+  if (!isolate->runtime_state()->redirected_intrinsic_functions()) {
+    size_t function_count = arraysize(kIntrinsicFunctions);
+    Function* redirected_functions = new Function[function_count];
+    memcpy(redirected_functions, kIntrinsicFunctions,
+           sizeof(kIntrinsicFunctions));
+    for (size_t i = 0; i < function_count; i++) {
+      ExternalReference redirected_entry =
+          ExternalReference::Create(static_cast<Runtime::FunctionId>(i));
+      redirected_functions[i].entry = redirected_entry.address();
     }
-
-    return isolate->runtime_state()->redirected_intrinsic_functions();
-  } else {
-    return kIntrinsicFunctions;
+    isolate->runtime_state()->set_redirected_intrinsic_functions(
+        redirected_functions);
   }
-}
 
+  return isolate->runtime_state()->redirected_intrinsic_functions();
+#else
+  return kIntrinsicFunctions;
+#endif
+}
 
 std::ostream& operator<<(std::ostream& os, Runtime::FunctionId id) {
   return os << Runtime::FunctionForId(id)->name;
 }
 
-
-class RuntimeCallStatEntries {
- public:
-  void Print(std::ostream& os) {
-    if (total_call_count > 0) {
-      std::sort(entries.rbegin(), entries.rend());
-      os << "Runtime function                                  Time      "
-            "Count"
-         << std::endl
-         << std::string(70, '=') << std::endl;
-      for (Entry& entry : entries) {
-        entry.Print(os);
-      }
-      os << std::string(60, '-') << std::endl;
-      Entry("Total", total_time, total_call_count).Print(os);
-    }
-  }
-
-  void Add(const char* name, base::TimeDelta time, uint32_t count) {
-    entries.push_back(Entry(name, time, count));
-    total_time += time;
-    total_call_count += count;
-  }
-
- private:
-  class Entry {
-   public:
-    Entry(const char* name, base::TimeDelta time, uint64_t count)
-        : name_(name), time_(time.InMilliseconds()), count_(count) {}
-
-    bool operator<(const Entry& other) const {
-      if (time_ < other.time_) return true;
-      if (time_ > other.time_) return false;
-      return count_ < other.count_;
-    }
-
-    void Print(std::ostream& os) {
-      os << std::setw(50) << name_;
-      os << std::setw(8) << time_ << "ms";
-      os << std::setw(10) << count_ << std::endl;
-    }
-
-   private:
-    const char* name_;
-    int64_t time_;
-    uint64_t count_;
-  };
-
-  uint64_t total_call_count = 0;
-  base::TimeDelta total_time;
-  std::vector<Entry> entries;
-};
-
-
-void RuntimeCallStats::Print(std::ostream& os) {
-  RuntimeCallStatEntries entries;
-
-#define PRINT_COUNTER(name, nargs, ressize)                                    \
-  if (this->Count_Runtime_##name > 0) {                                        \
-    entries.Add(#name, this->Time_Runtime_##name, this->Count_Runtime_##name); \
-  }
-  FOR_EACH_INTRINSIC(PRINT_COUNTER)
-#undef PRINT_COUNTER
-  entries.Print(os);
-}
-
-
-void RuntimeCallStats::Reset() {
-#define RESET_COUNTER(name, nargs, ressize) \
-  Count_Runtime_##name = 0;                 \
-  Time_Runtime_##name = base::TimeDelta();
-  FOR_EACH_INTRINSIC(RESET_COUNTER)
-#undef RESET_COUNTER
-}
 
 }  // namespace internal
 }  // namespace v8

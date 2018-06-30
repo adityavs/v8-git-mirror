@@ -6,7 +6,7 @@
 #define V8_COMPILER_INSTRUCTION_SCHEDULER_H_
 
 #include "src/compiler/instruction.h"
-#include "src/zone-containers.h"
+#include "src/zone/zone-containers.h"
 
 namespace v8 {
 namespace internal {
@@ -16,13 +16,15 @@ namespace compiler {
 // scheduler is aware of dependencies between instructions.
 enum ArchOpcodeFlags {
   kNoOpcodeFlags = 0,
-  kIsBlockTerminator = 1,  // The instruction marks the end of a basic block
-                           // e.g.: jump and return instructions.
-  kHasSideEffect = 2,      // The instruction has some side effects (memory
-                           // store, function call...)
-  kIsLoadOperation = 4,    // The instruction is a memory load.
+  kHasSideEffect = 1,    // The instruction has some side effects (memory
+                         // store, function call...)
+  kIsLoadOperation = 2,  // The instruction is a memory load.
+  kMayNeedDeoptOrTrapCheck = 4,  // The instruction may be associated with a
+                                 // deopt or trap check which must be run before
+                                 // instruction e.g. div on Intel platform which
+                                 // will raise an exception when the divisor is
+                                 // zero.
 };
-
 
 class InstructionScheduler final : public ZoneObject {
  public:
@@ -32,6 +34,7 @@ class InstructionScheduler final : public ZoneObject {
   void EndBlock(RpoNumber rpo);
 
   void AddInstruction(Instruction* instr);
+  void AddTerminator(Instruction* instr);
 
   static bool SchedulerSupported();
 
@@ -54,7 +57,7 @@ class InstructionScheduler final : public ZoneObject {
 
     // Record that we have scheduled one of the predecessors of this node.
     void DropUnscheduledPredecessor() {
-      DCHECK(unscheduled_predecessors_count_ > 0);
+      DCHECK_LT(0, unscheduled_predecessors_count_);
       unscheduled_predecessors_count_--;
     }
 
@@ -90,42 +93,103 @@ class InstructionScheduler final : public ZoneObject {
     int start_cycle_;
   };
 
-  // Compare the two nodes and return true if node1 is a better candidate than
-  // node2 (i.e. node1 should be scheduled before node2).
-  bool CompareNodes(ScheduleGraphNode *node1, ScheduleGraphNode *node2) const;
+  // Keep track of all nodes ready to be scheduled (i.e. all their dependencies
+  // have been scheduled. Note that this class is inteded to be extended by
+  // concrete implementation of the scheduling queue which define the policy
+  // to pop node from the queue.
+  class SchedulingQueueBase {
+   public:
+    explicit SchedulingQueueBase(InstructionScheduler* scheduler)
+      : scheduler_(scheduler),
+        nodes_(scheduler->zone()) {
+    }
 
-  // Perform scheduling for the current block.
+    void AddNode(ScheduleGraphNode* node);
+
+    bool IsEmpty() const {
+      return nodes_.empty();
+    }
+
+   protected:
+    InstructionScheduler* scheduler_;
+    ZoneLinkedList<ScheduleGraphNode*> nodes_;
+  };
+
+  // A scheduling queue which prioritize nodes on the critical path (we look
+  // for the instruction with the highest latency on the path to reach the end
+  // of the graph).
+  class CriticalPathFirstQueue : public SchedulingQueueBase  {
+   public:
+    explicit CriticalPathFirstQueue(InstructionScheduler* scheduler)
+      : SchedulingQueueBase(scheduler) { }
+
+    // Look for the best candidate to schedule, remove it from the queue and
+    // return it.
+    ScheduleGraphNode* PopBestCandidate(int cycle);
+  };
+
+  // A queue which pop a random node from the queue to perform stress tests on
+  // the scheduler.
+  class StressSchedulerQueue : public SchedulingQueueBase  {
+   public:
+    explicit StressSchedulerQueue(InstructionScheduler* scheduler)
+      : SchedulingQueueBase(scheduler) { }
+
+    ScheduleGraphNode* PopBestCandidate(int cycle);
+
+   private:
+    Isolate *isolate() {
+      return scheduler_->isolate();
+    }
+  };
+
+  // Perform scheduling for the current block specifying the queue type to
+  // use to determine the next best candidate.
+  template <typename QueueType>
   void ScheduleBlock();
 
   // Return the scheduling properties of the given instruction.
   int GetInstructionFlags(const Instruction* instr) const;
   int GetTargetInstructionFlags(const Instruction* instr) const;
 
-  // Return true if instr2 uses any value defined by instr1.
-  bool HasOperandDependency(const Instruction* instr1,
-                            const Instruction* instr2) const;
-
-  // Return true if the instruction is a basic block terminator.
-  bool IsBlockTerminator(const Instruction* instr) const;
-
   // Check whether the given instruction has side effects (e.g. function call,
   // memory store).
   bool HasSideEffect(const Instruction* instr) const {
-    return GetInstructionFlags(instr) & kHasSideEffect;
+    return (GetInstructionFlags(instr) & kHasSideEffect) != 0;
   }
 
   // Return true if the instruction is a memory load.
   bool IsLoadOperation(const Instruction* instr) const {
-    return GetInstructionFlags(instr) & kIsLoadOperation;
+    return (GetInstructionFlags(instr) & kIsLoadOperation) != 0;
+  }
+
+  // The scheduler will not move the following instructions before the last
+  // deopt/trap check:
+  //  * loads (this is conservative)
+  //  * instructions with side effect
+  //  * other deopts/traps
+  // Any other instruction can be moved, apart from those that raise exceptions
+  // on specific inputs - these are filtered out by the deopt/trap check.
+  bool MayNeedDeoptOrTrapCheck(const Instruction* instr) const {
+    return (GetInstructionFlags(instr) & kMayNeedDeoptOrTrapCheck) != 0;
+  }
+
+  // Return true if the instruction cannot be moved before the last deopt or
+  // trap point we encountered.
+  bool DependsOnDeoptOrTrap(const Instruction* instr) const {
+    return MayNeedDeoptOrTrapCheck(instr) || instr->IsDeoptimizeCall() ||
+           instr->IsTrap() || HasSideEffect(instr) || IsLoadOperation(instr);
   }
 
   // Identify nops used as a definition point for live-in registers at
   // function entry.
   bool IsFixedRegisterParameter(const Instruction* instr) const {
-    return (instr->arch_opcode() == kArchNop) &&
-      (instr->OutputCount() == 1) &&
-      (instr->OutputAt(0)->IsUnallocated()) &&
-      UnallocatedOperand::cast(instr->OutputAt(0))->HasFixedRegisterPolicy();
+    return (instr->arch_opcode() == kArchNop) && (instr->OutputCount() == 1) &&
+           (instr->OutputAt(0)->IsUnallocated()) &&
+           (UnallocatedOperand::cast(instr->OutputAt(0))
+                ->HasFixedRegisterPolicy() ||
+            UnallocatedOperand::cast(instr->OutputAt(0))
+                ->HasFixedFPRegisterPolicy());
   }
 
   void ComputeTotalLatencies();
@@ -134,10 +198,13 @@ class InstructionScheduler final : public ZoneObject {
 
   Zone* zone() { return zone_; }
   InstructionSequence* sequence() { return sequence_; }
+  Isolate* isolate() { return sequence()->isolate(); }
 
   Zone* zone_;
   InstructionSequence* sequence_;
   ZoneVector<ScheduleGraphNode*> graph_;
+
+  friend class InstructionSchedulerTester;
 
   // Last side effect instruction encountered while building the graph.
   ScheduleGraphNode* last_side_effect_instr_;
@@ -153,6 +220,14 @@ class InstructionScheduler final : public ZoneObject {
   // All these nops are chained together and added as a predecessor of every
   // other instructions in the basic block.
   ScheduleGraphNode* last_live_in_reg_marker_;
+
+  // Last deoptimization or trap instruction encountered while building the
+  // graph.
+  ScheduleGraphNode* last_deopt_or_trap_;
+
+  // Keep track of definition points for virtual registers. This is used to
+  // record operand dependencies in the scheduling graph.
+  ZoneMap<int32_t, ScheduleGraphNode*> operands_map_;
 };
 
 }  // namespace compiler
