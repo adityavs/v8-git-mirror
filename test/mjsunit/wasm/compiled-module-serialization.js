@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --expose-wasm --allow-natives-syntax --expose-gc
+// The test needs --wasm-tier-up because we can't serialize and deserialize
+// Liftoff code.
+// Flags: --expose-wasm --allow-natives-syntax --expose-gc --wasm-tier-up
 
-load("test/mjsunit/wasm/wasm-constants.js");
-load("test/mjsunit/wasm/wasm-module-builder.js");
+d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 (function SerializeAndDeserializeModule() {
   print(arguments.callee.name);
@@ -18,11 +19,11 @@ load("test/mjsunit/wasm/wasm-module-builder.js");
 
   builder.addFunction("main", kSig_i_i)
     .addBody([
-      kExprGetLocal, 0,
+      kExprLocalGet, 0,
       kExprI32LoadMem, 0, 0,
       kExprI32Const, 1,
       kExprCallIndirect, signature, kTableZero,
-      kExprGetLocal,0,
+      kExprLocalGet,0,
       kExprI32LoadMem,0, 0,
       kExprCallFunction, 0,
       kExprI32Add
@@ -32,7 +33,7 @@ load("test/mjsunit/wasm/wasm-module-builder.js");
   // return mem[i] + some_value();
   builder.addFunction("_wrap_writer", signature)
     .addBody([
-      kExprGetLocal, 0,
+      kExprLocalGet, 0,
       kExprCallFunction, 1]);
   builder.appendToTable([2, 3]);
 
@@ -77,9 +78,10 @@ load("test/mjsunit/wasm/wasm-module-builder.js");
 
 (function DeserializeInvalidObject() {
   print(arguments.callee.name);
-  var invalid_buffer = new ArrayBuffer(10);
+  const invalid_buffer = new ArrayBuffer(10);
+  const invalid_buffer_view = new Uint8Array(10);
 
-  module = %DeserializeWasmModule(invalid_buffer, invalid_buffer);
+  module = %DeserializeWasmModule(invalid_buffer, invalid_buffer_view);
   assertEquals(module, undefined);
 })();
 
@@ -175,13 +177,13 @@ load("test/mjsunit/wasm/wasm-module-builder.js");
   builder.addGlobal(kWasmI32, true);
   builder.addFunction("read", kSig_i_v)
     .addBody([
-      kExprGetGlobal, 0])
+      kExprGlobalGet, 0])
     .exportFunc();
 
   builder.addFunction("write", kSig_v_i)
     .addBody([
-      kExprGetLocal, 0,
-      kExprSetGlobal, 0])
+      kExprLocalGet, 0,
+      kExprGlobalSet, 0])
     .exportFunc();
 
   var wire_bytes = builder.toBuffer();
@@ -213,12 +215,12 @@ load("test/mjsunit/wasm/wasm-module-builder.js");
 
     builder.addFunction("main", kSig_i_ii)
       .addBody([
-        kExprGetLocal, 0,   // --
+        kExprLocalGet, 0,   // --
         kExprCallIndirect, sig_index1, kTableZero])  // --
       .exportAs("main");
 
-    builder.setFunctionTableBounds(kTableSize, kTableSize);
-    builder.addFunctionTableInit(0, false, [f1.index]);
+    builder.setTableBounds(kTableSize, kTableSize);
+    builder.addActiveElementSegment(0, WasmInitExpr.I32Const(0), [f1.index]);
     builder.addExportOfKind("table", kExternalTable, 0);
 
     return new WebAssembly.Module(builder.toBuffer());
@@ -234,12 +236,12 @@ load("test/mjsunit/wasm/wasm-module-builder.js");
 
   builder.addFunction("main", kSig_i_ii)
     .addBody([
-      kExprGetLocal, 0,   // --
+      kExprLocalGet, 0,   // --
       kExprCallIndirect, sig_index2, kTableZero])  // --
     .exportAs("main");
 
   builder.addImportedTable("z", "table", kTableSize, kTableSize);
-  builder.addFunctionTableInit(1, false, [f2.index], true);
+  builder.addActiveElementSegment(0, WasmInitExpr.I32Const(1), [f2.index]);
   var m2_bytes = builder.toBuffer();
   var m2 = new WebAssembly.Module(m2_bytes);
 
@@ -293,7 +295,7 @@ load("test/mjsunit/wasm/wasm-module-builder.js");
     const builder = new WasmModuleBuilder();
     builder.addMemory(1, 1);
     builder.addFunction('main', kSig_i_i)
-        .addBody([kExprGetLocal, 0, kExprI32LoadMem, 0, 0])
+        .addBody([kExprLocalGet, 0, kExprI32LoadMem, 0, 0])
         .exportFunc();
     const wire_bytes = builder.toBuffer();
     const module = new WebAssembly.Module(wire_bytes);
@@ -308,4 +310,99 @@ load("test/mjsunit/wasm/wasm-module-builder.js");
   assertEquals(0, instance.exports.main(kPageSize - 4));
   assertTraps(
       kTrapMemOutOfBounds, _ => instance.exports.main(kPageSize - 3));
+})();
+
+(function DirectCallAfterSerialization() {
+  print(arguments.callee.name);
+  const builder = new WasmModuleBuilder();
+  var fun1 = builder.addFunction('fun1', kSig_i_v)
+      .addBody([kExprI32Const, 23]);
+  var fun2 = builder.addFunction('fun2', kSig_i_v)
+      .addBody([kExprI32Const, 42]);
+  builder.addFunction('main', kSig_i_v)
+      .addBody([kExprCallFunction, fun1.index,
+                kExprCallFunction, fun2.index,
+                kExprI32Add])
+      .exportFunc();
+
+  var wire_bytes = builder.toBuffer();
+  var module = new WebAssembly.Module(wire_bytes);
+  var buffer = %SerializeWasmModule(module);
+  module = %DeserializeWasmModule(buffer, wire_bytes);
+  var instance = new WebAssembly.Instance(module);
+
+  assertEquals(65, instance.exports.main());
+})();
+
+(function ImportCallAfterSerialization() {
+  print(arguments.callee.name);
+  const builder = new WasmModuleBuilder();
+  var fun_import = builder.addImport("", "my_import", kSig_i_v);
+  var fun = builder.addFunction('fun', kSig_i_v)
+      .addBody([kExprI32Const, 23]);
+  builder.addFunction('main', kSig_i_v)
+      .addBody([kExprCallFunction, fun.index,
+                kExprCallFunction, fun_import,
+                kExprI32Add])
+      .exportFunc();
+
+  var wire_bytes = builder.toBuffer();
+  var module = new WebAssembly.Module(wire_bytes);
+  var buffer = %SerializeWasmModule(module);
+  module = %DeserializeWasmModule(buffer, wire_bytes);
+  var instance = new WebAssembly.Instance(module, {"": {my_import: () => 42 }});
+
+  assertEquals(65, instance.exports.main());
+})();
+
+(function BranchTableAfterSerialization() {
+  print(arguments.callee.name);
+  const builder = new WasmModuleBuilder();
+  builder.addFunction('main', kSig_i_i)
+      .addBody([kExprBlock, kWasmVoid,
+                  kExprBlock, kWasmVoid,
+                    kExprBlock, kWasmVoid,
+                      kExprBlock, kWasmVoid,
+                        kExprBlock, kWasmVoid,
+                          kExprBlock, kWasmVoid,
+                            kExprBlock, kWasmVoid,
+                              kExprLocalGet, 0,
+                              kExprBrTable, 6, 0, 1, 2, 3, 4, 5, 6,
+                            kExprEnd,
+                            kExprI32Const, 3,
+                            kExprReturn,
+                          kExprEnd,
+                          kExprI32Const, 7,
+                          kExprReturn,
+                        kExprEnd,
+                        kExprI32Const, 9,
+                        kExprReturn,
+                      kExprEnd,
+                      kExprI32Const, 11,
+                      kExprReturn,
+                    kExprEnd,
+                    kExprI32Const, 23,
+                    kExprReturn,
+                  kExprEnd,
+                  kExprI32Const, 35,
+                  kExprReturn,
+                kExprEnd,
+                kExprI32Const, 42,
+                kExprReturn])
+      .exportFunc();
+
+  var wire_bytes = builder.toBuffer();
+  var module = new WebAssembly.Module(wire_bytes);
+  var buffer = %SerializeWasmModule(module);
+  module = %DeserializeWasmModule(buffer, wire_bytes);
+  var instance = new WebAssembly.Instance(module);
+
+  assertEquals(3, instance.exports.main(0));
+  assertEquals(7, instance.exports.main(1));
+  assertEquals(9, instance.exports.main(2));
+  assertEquals(11, instance.exports.main(3));
+  assertEquals(23, instance.exports.main(4));
+  assertEquals(35, instance.exports.main(5));
+  assertEquals(42, instance.exports.main(6));
+  assertEquals(42, instance.exports.main(9));
 })();

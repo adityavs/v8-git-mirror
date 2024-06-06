@@ -49,14 +49,14 @@ std::vector<OS::SharedLibraryAddress> OS::GetSharedLibraryAddresses() {
   for (unsigned int i = 0; i < images_count; ++i) {
     const mach_header* header = _dyld_get_image_header(i);
     if (header == nullptr) continue;
-#if V8_HOST_ARCH_X64
+#if V8_HOST_ARCH_I32
+    unsigned int size;
+    char* code_ptr = getsectdatafromheader(header, SEG_TEXT, SECT_TEXT, &size);
+#else
     uint64_t size;
     char* code_ptr = getsectdatafromheader_64(
         reinterpret_cast<const mach_header_64*>(header), SEG_TEXT, SECT_TEXT,
         &size);
-#else
-    unsigned int size;
-    char* code_ptr = getsectdatafromheader(header, SEG_TEXT, SECT_TEXT, &size);
 #endif
     if (code_ptr == nullptr) continue;
     const intptr_t slide = _dyld_get_image_vmaddr_slide(i);
@@ -71,6 +71,37 @@ void OS::SignalCodeMovingGC() {}
 
 TimezoneCache* OS::CreateTimezoneCache() {
   return new PosixDefaultTimezoneCache();
+}
+
+void OS::AdjustSchedulingParams() {
+#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32
+  {
+    // Check availability of scheduling params.
+    uint32_t val = 0;
+    size_t valSize = sizeof(val);
+    int rc = sysctlbyname("kern.tcsm_available", &val, &valSize, NULL, 0);
+    if (rc < 0 || !val) return;
+  }
+
+  {
+    // Adjust scheduling params.
+    uint32_t val = 1;
+    int rc = sysctlbyname("kern.tcsm_enable", NULL, NULL, &val, sizeof(val));
+    DCHECK_GE(rc, 0);
+    USE(rc);
+  }
+#endif
+}
+
+std::vector<OS::MemoryRange> OS::GetFreeMemoryRangesWithin(
+    OS::Address boundary_start, OS::Address boundary_end, size_t minimum_size,
+    size_t alignment) {
+  return {};
+}
+
+// static
+Stack::StackSlot Stack::GetStackStart() {
+  return pthread_get_stackaddr_np(pthread_self());
 }
 
 }  // namespace base

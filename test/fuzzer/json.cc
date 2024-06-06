@@ -6,10 +6,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "include/v8.h"
+#include "include/v8-context.h"
+#include "include/v8-exception.h"
+#include "include/v8-isolate.h"
+#include "include/v8-json.h"
+#include "include/v8-local-handle.h"
+#include "include/v8-primitive.h"
 #include "test/fuzzer/fuzzer-support.h"
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  // Ignore too long inputs as they tend to find OOM or timeouts, not real bugs.
+  if (size > 16 * 1024) {
+    return false;
+  }
+
   v8_fuzzer::FuzzerSupport* support = v8_fuzzer::FuzzerSupport::Get();
   v8::Isolate* isolate = support->GetIsolate();
 

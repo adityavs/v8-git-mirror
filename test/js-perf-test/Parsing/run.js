@@ -3,14 +3,19 @@
 // found in the LICENSE file.
 
 
-load('../base.js');
+d8.file.execute("../base.js");
 
-load('comments.js');
+const iterations = 100;
+let code;
+
+d8.file.execute("comments.js");
+d8.file.execute("strings.js");
+d8.file.execute("arrowfunctions.js")
 
 var success = true;
 
 function PrintResult(name, result) {
-  print(name + '-Parsing(Score): ' + result);
+  print(name + "-Parsing(Score): " + result);
 }
 
 

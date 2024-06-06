@@ -4,11 +4,20 @@
 
 #ifdef V8_INTL_SUPPORT
 
-#include "src/builtins/builtins-intl.h"
-#include "src/lookup.h"
-#include "src/objects-inl.h"
 #include "src/objects/intl-objects.h"
+#include "src/objects/js-break-iterator.h"
+#include "src/objects/js-collator-inl.h"
+#include "src/objects/js-date-time-format.h"
+#include "src/objects/js-list-format.h"
+#include "src/objects/js-number-format.h"
+#include "src/objects/js-plural-rules.h"
+#include "src/objects/js-relative-time-format.h"
+#include "src/objects/js-segmenter.h"
+#include "src/objects/lookup.h"
+#include "src/objects/objects-inl.h"
+#include "src/objects/option-utils.h"
 #include "test/cctest/cctest.h"
+#include "unicode/coll.h"
 
 namespace v8 {
 namespace internal {
@@ -105,125 +114,198 @@ TEST(FlattenRegionsToParts) {
       });
 }
 
-TEST(GetOptions) {
+TEST(GetStringOption) {
   LocalContext env;
   Isolate* isolate = CcTest::i_isolate();
   v8::Isolate* v8_isolate = env->GetIsolate();
   v8::HandleScope handle_scope(v8_isolate);
 
   Handle<JSObject> options = isolate->factory()->NewJSObjectWithNullProto();
-  Handle<String> key = isolate->factory()->NewStringFromAsciiChecked("foo");
-  Handle<String> service =
-      isolate->factory()->NewStringFromAsciiChecked("service");
-  Handle<Object> undefined = isolate->factory()->undefined_value();
-  Handle<FixedArray> empty_fixed_array =
-      isolate->factory()->empty_fixed_array();
-
-  // No value found
-  Handle<Object> result =
-      Object::GetOption(isolate, options, key, Object::OptionType::String,
-                        empty_fixed_array, undefined, service)
-          .ToHandleChecked();
-  CHECK(result->IsUndefined(isolate));
-
-  // Value found
-  v8::internal::LookupIterator it(options, key);
-  CHECK(Object::SetProperty(&it, Handle<Smi>(Smi::FromInt(42), isolate),
-                            LanguageMode::kStrict,
-                            AllocationMemento::MAY_BE_STORE_FROM_KEYED)
-            .FromJust());
-  result = Object::GetOption(isolate, options, key, Object::OptionType::String,
-                             empty_fixed_array, undefined, service)
-               .ToHandleChecked();
-  CHECK(result->IsString());
-  Handle<String> expected_str =
-      isolate->factory()->NewStringFromAsciiChecked("42");
-  CHECK(String::Equals(isolate, expected_str, Handle<String>::cast(result)));
-
-  result = Object::GetOption(isolate, options, key, Object::OptionType::Boolean,
-                             empty_fixed_array, undefined, service)
-               .ToHandleChecked();
-  CHECK(result->IsBoolean());
-  CHECK(result->IsTrue(isolate));
-
-  // No expected value in values array
-  Handle<FixedArray> values = isolate->factory()->NewFixedArray(1);
   {
-    CHECK(!Object::GetOption(isolate, options, key, Object::OptionType::String,
-                             values, undefined, service)
-               .ToHandle(&result));
+    // No value found
+    std::unique_ptr<char[]> result = nullptr;
+    Maybe<bool> found =
+        GetStringOption(isolate, options, "foo", std::vector<const char*>{},
+                        "service", &result);
+    CHECK(!found.FromJust());
+    CHECK_NULL(result);
+  }
+
+  Handle<String> key = isolate->factory()->NewStringFromAsciiChecked("foo");
+  LookupIterator it(isolate, options, key);
+  CHECK(Object::SetProperty(&it, Handle<Smi>(Smi::FromInt(42), isolate),
+                            StoreOrigin::kMaybeKeyed,
+                            Just(ShouldThrow::kThrowOnError))
+            .FromJust());
+
+  {
+    // Value found
+    std::unique_ptr<char[]> result = nullptr;
+    Maybe<bool> found =
+        GetStringOption(isolate, options, "foo", std::vector<const char*>{},
+                        "service", &result);
+    CHECK(found.FromJust());
+    CHECK_NOT_NULL(result);
+    CHECK_EQ(0, strcmp("42", result.get()));
+  }
+
+  {
+    // No expected value in values array
+    std::unique_ptr<char[]> result = nullptr;
+    Maybe<bool> found =
+        GetStringOption(isolate, options, "foo",
+                        std::vector<const char*>{"bar"}, "service", &result);
     CHECK(isolate->has_pending_exception());
+    CHECK(found.IsNothing());
+    CHECK_NULL(result);
     isolate->clear_pending_exception();
   }
 
-  // Add expected value to values array
-  values->set(0, *expected_str);
-  result = Object::GetOption(isolate, options, key, Object::OptionType::String,
-                             values, undefined, service)
-               .ToHandleChecked();
-  CHECK(result->IsString());
-  CHECK(String::Equals(isolate, expected_str, Handle<String>::cast(result)));
-
-  // Test boolean values
-  CHECK(Object::SetProperty(&it, isolate->factory()->ToBoolean(false),
-                            LanguageMode::kStrict,
-                            AllocationMemento::MAY_BE_STORE_FROM_KEYED)
-            .FromJust());
-  result = Object::GetOption(isolate, options, key, Object::OptionType::String,
-                             empty_fixed_array, undefined, service)
-               .ToHandleChecked();
-  CHECK(result->IsString());
-
-  result = Object::GetOption(isolate, options, key, Object::OptionType::Boolean,
-                             empty_fixed_array, undefined, service)
-               .ToHandleChecked();
-  CHECK(result->IsBoolean());
-  CHECK(result->IsFalse(isolate));
+  {
+    // Expected value in values array
+    std::unique_ptr<char[]> result = nullptr;
+    Maybe<bool> found =
+        GetStringOption(isolate, options, "foo", std::vector<const char*>{"42"},
+                        "service", &result);
+    CHECK(found.FromJust());
+    CHECK_NOT_NULL(result);
+    CHECK_EQ(0, strcmp("42", result.get()));
+  }
 }
 
-bool ScriptTagWasRemoved(std::string locale, std::string expected) {
-  std::string without_script_tag;
-  bool didShorten =
-      IntlUtil::RemoveLocaleScriptTag(locale, &without_script_tag);
-  return didShorten && expected == without_script_tag;
-}
+TEST(GetBoolOption) {
+  LocalContext env;
+  Isolate* isolate = CcTest::i_isolate();
+  v8::Isolate* v8_isolate = env->GetIsolate();
+  v8::HandleScope handle_scope(v8_isolate);
 
-bool ScriptTagWasNotRemoved(std::string locale) {
-  std::string without_script_tag;
-  bool didShorten =
-      IntlUtil::RemoveLocaleScriptTag(locale, &without_script_tag);
-  return !didShorten && without_script_tag.empty();
-}
+  Handle<JSObject> options = isolate->factory()->NewJSObjectWithNullProto();
+  {
+    bool result = false;
+    Maybe<bool> found =
+        GetBoolOption(isolate, options, "foo", "service", &result);
+    CHECK(!found.FromJust());
+    CHECK(!result);
+  }
 
-TEST(RemoveLocaleScriptTag) {
-  CHECK(ScriptTagWasRemoved("aa_Bbbb_CC", "aa_CC"));
-  CHECK(ScriptTagWasRemoved("aaa_Bbbb_CC", "aaa_CC"));
+  Handle<String> key = isolate->factory()->NewStringFromAsciiChecked("foo");
+  {
+    LookupIterator it(isolate, options, key);
+    Handle<Object> false_value =
+        handle(i::ReadOnlyRoots(isolate).false_value(), isolate);
+    Object::SetProperty(isolate, options, key, false_value,
+                        StoreOrigin::kMaybeKeyed,
+                        Just(ShouldThrow::kThrowOnError))
+        .Assert();
+    bool result = false;
+    Maybe<bool> found =
+        GetBoolOption(isolate, options, "foo", "service", &result);
+    CHECK(found.FromJust());
+    CHECK(!result);
+  }
 
-  CHECK(ScriptTagWasNotRemoved("aa"));
-  CHECK(ScriptTagWasNotRemoved("aaa"));
-  CHECK(ScriptTagWasNotRemoved("aa_CC"));
-  CHECK(ScriptTagWasNotRemoved("aa_Bbb_CC"));
-  CHECK(ScriptTagWasNotRemoved("aa_1bbb_CC"));
+  {
+    LookupIterator it(isolate, options, key);
+    Handle<Object> true_value =
+        handle(i::ReadOnlyRoots(isolate).true_value(), isolate);
+    Object::SetProperty(isolate, options, key, true_value,
+                        StoreOrigin::kMaybeKeyed,
+                        Just(ShouldThrow::kThrowOnError))
+        .Assert();
+    bool result = false;
+    Maybe<bool> found =
+        GetBoolOption(isolate, options, "foo", "service", &result);
+    CHECK(found.FromJust());
+    CHECK(result);
+  }
 }
 
 TEST(GetAvailableLocales) {
   std::set<std::string> locales;
 
-  locales = IntlUtil::GetAvailableLocales(IcuService::kBreakIterator);
+  locales = JSV8BreakIterator::GetAvailableLocales();
   CHECK(locales.count("en-US"));
   CHECK(!locales.count("abcdefg"));
 
-  locales = IntlUtil::GetAvailableLocales(IcuService::kCollator);
+  locales = JSCollator::GetAvailableLocales();
   CHECK(locales.count("en-US"));
 
-  locales = IntlUtil::GetAvailableLocales(IcuService::kDateFormat);
+  locales = JSDateTimeFormat::GetAvailableLocales();
   CHECK(locales.count("en-US"));
 
-  locales = IntlUtil::GetAvailableLocales(IcuService::kNumberFormat);
+  locales = JSListFormat::GetAvailableLocales();
   CHECK(locales.count("en-US"));
 
-  locales = IntlUtil::GetAvailableLocales(IcuService::kPluralRules);
+  locales = JSNumberFormat::GetAvailableLocales();
   CHECK(locales.count("en-US"));
+
+  locales = JSPluralRules::GetAvailableLocales();
+  CHECK(locales.count("en"));
+
+  locales = JSRelativeTimeFormat::GetAvailableLocales();
+  CHECK(locales.count("en-US"));
+
+  locales = JSSegmenter::GetAvailableLocales();
+  CHECK(locales.count("en-US"));
+  CHECK(!locales.count("abcdefg"));
+}
+
+// Tests that the LocaleCompare fast path and generic path return the same
+// comparison results for all ASCII strings.
+TEST(StringLocaleCompareFastPath) {
+  LocalContext env;
+  Isolate* isolate = CcTest::i_isolate();
+  HandleScope handle_scope(isolate);
+
+  // We compare all single-char strings of printable ASCII characters.
+  std::vector<Handle<String>> ascii_strings;
+  for (int c = 0; c <= 0x7F; c++) {
+    if (!std::isprint(c)) continue;
+    ascii_strings.push_back(
+        isolate->factory()->LookupSingleCharacterStringFromCode(c));
+  }
+
+  Handle<JSFunction> collator_constructor = Handle<JSFunction>(
+      JSFunction::cast(
+          isolate->context().native_context().intl_collator_function()),
+      isolate);
+  Handle<Map> constructor_map =
+      JSFunction::GetDerivedMap(isolate, collator_constructor,
+                                collator_constructor)
+          .ToHandleChecked();
+  Handle<Object> options(ReadOnlyRoots(isolate).undefined_value(), isolate);
+  static const char* const kMethodName = "StringLocaleCompareFastPath";
+
+  // For all fast locales, exhaustively compare within the printable ASCII
+  // range.
+  const std::set<std::string>& locales = JSCollator::GetAvailableLocales();
+  for (const std::string& locale : locales) {
+    Handle<String> locale_string =
+        isolate->factory()->NewStringFromAsciiChecked(locale.c_str());
+
+    if (Intl::CompareStringsOptionsFor(isolate, locale_string, options) !=
+        Intl::CompareStringsOptions::kTryFastPath) {
+      continue;
+    }
+
+    Handle<JSCollator> collator =
+        JSCollator::New(isolate, constructor_map, locale_string, options,
+                        kMethodName)
+            .ToHandleChecked();
+
+    for (size_t i = 0; i < ascii_strings.size(); i++) {
+      Handle<String> lhs = ascii_strings[i];
+      for (size_t j = i + 1; j < ascii_strings.size(); j++) {
+        Handle<String> rhs = ascii_strings[j];
+        CHECK_EQ(
+            Intl::CompareStrings(isolate, *collator->icu_collator().raw(), lhs,
+                                 rhs, Intl::CompareStringsOptions::kNone),
+            Intl::CompareStrings(isolate, *collator->icu_collator().raw(), lhs,
+                                 rhs,
+                                 Intl::CompareStringsOptions::kTryFastPath));
+      }
+    }
+  }
 }
 
 }  // namespace internal

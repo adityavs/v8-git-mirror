@@ -25,24 +25,25 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "src/v8.h"
+#include "src/init/v8.h"
 
-#include "src/disassembler.h"
+#include "src/codegen/ppc/assembler-ppc-inl.h"
+#include "src/diagnostics/disassembler.h"
+#include "src/execution/simulator.h"
 #include "src/heap/factory.h"
-#include "src/ppc/assembler-ppc-inl.h"
-#include "src/simulator.h"
 #include "test/cctest/cctest.h"
+#include "test/common/assembler-tester.h"
 
 namespace v8 {
 namespace internal {
 
 // TODO(ppc): Refine these signatures per test case, they can have arbitrary
 // return and argument types and arbitrary number of arguments.
-using F_iiiii = Object*(int x, int p1, int p2, int p3, int p4);
-using F_piiii = Object*(void* p0, int p1, int p2, int p3, int p4);
-using F_ppiii = Object*(void* p0, void* p1, int p2, int p3, int p4);
-using F_pppii = Object*(void* p0, void* p1, void* p2, int p3, int p4);
-using F_ippii = Object*(int p0, void* p1, void* p2, int p3, int p4);
+using F_iiiii = void*(int x, int p1, int p2, int p3, int p4);
+using F_piiii = void*(void* p0, int p1, int p2, int p3, int p4);
+using F_ppiii = void*(void* p0, void* p1, int p2, int p3, int p4);
+using F_pppii = void*(void* p0, void* p1, void* p2, int p3, int p4);
+using F_ippii = void*(int p0, void* p1, void* p2, int p3, int p4);
 
 #define __ assm.
 
@@ -52,9 +53,7 @@ TEST(0) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  Assembler assm(Assembler::Options{}, nullptr, 0);
-
-  __ function_descriptor();
+  Assembler assm(AssemblerOptions{});
 
   __ add(r3, r3, r4);
   __ blr();
@@ -62,9 +61,9 @@ TEST(0) {
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
   Handle<Code> code =
-      isolate->factory()->NewCode(desc, Code::STUB, Handle<Code>());
+      Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef DEBUG
-  code->Print(isolate);
+  code->Print();
 #endif
   auto f = GeneratedCode<F_iiiii>::FromCode(*code);
   intptr_t res = reinterpret_cast<intptr_t>(f.Call(3, 4, 0, 0, 0));
@@ -79,10 +78,8 @@ TEST(1) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  Assembler assm(Assembler::Options{}, nullptr, 0);
+  Assembler assm(AssemblerOptions{});
   Label L, C;
-
-  __ function_descriptor();
 
   __ mr(r4, r3);
   __ li(r3, Operand::Zero());
@@ -100,9 +97,9 @@ TEST(1) {
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
   Handle<Code> code =
-      isolate->factory()->NewCode(desc, Code::STUB, Handle<Code>());
+      Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef DEBUG
-  code->Print(isolate);
+  code->Print();
 #endif
   auto f = GeneratedCode<F_iiiii>::FromCode(*code);
   intptr_t res = reinterpret_cast<intptr_t>(f.Call(100, 0, 0, 0, 0));
@@ -116,10 +113,8 @@ TEST(2) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  Assembler assm(Assembler::Options{}, nullptr, 0);
+  Assembler assm(AssemblerOptions{});
   Label L, C;
-
-  __ function_descriptor();
 
   __ mr(r4, r3);
   __ li(r3, Operand(1));
@@ -150,9 +145,9 @@ TEST(2) {
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
   Handle<Code> code =
-      isolate->factory()->NewCode(desc, Code::STUB, Handle<Code>());
+      Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef DEBUG
-  code->Print(isolate);
+  code->Print();
 #endif
   auto f = GeneratedCode<F_iiiii>::FromCode(*code);
   intptr_t res = reinterpret_cast<intptr_t>(f.Call(10, 0, 0, 0, 0));
@@ -166,17 +161,14 @@ TEST(3) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  typedef struct {
+  struct T {
     int i;
     char c;
     int16_t s;
-  } T;
+  };
   T t;
 
-  Assembler assm(Assembler::Options{}, nullptr, 0);
-  Label L, C;
-
-  __ function_descriptor();
+  Assembler assm(AssemblerOptions{});
 
 // build a frame
 #if V8_TARGET_ARCH_PPC64
@@ -222,9 +214,9 @@ TEST(3) {
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
   Handle<Code> code =
-      isolate->factory()->NewCode(desc, Code::STUB, Handle<Code>());
+      Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef DEBUG
-  code->Print(isolate);
+  code->Print();
 #endif
   auto f = GeneratedCode<F_piiii>::FromCode(*code);
   t.i = 100000;
@@ -245,7 +237,7 @@ TEST(4) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  typedef struct {
+  struct T {
     double a;
     double b;
     double c;
@@ -259,12 +251,12 @@ TEST(4) {
     double n;
     float x;
     float y;
-  } T;
+  };
   T t;
 
   // Create a function that accepts &t, and loads, manipulates, and stores
   // the doubles and floats.
-  Assembler assm(Assembler::Options{}, nullptr, 0);
+  Assembler assm(AssemblerOptions{});
   Label L, C;
 
   if (CpuFeatures::IsSupported(VFP3)) {
@@ -333,13 +325,13 @@ TEST(4) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Object* code = isolate->heap()->CreateCode(
+    Object code = isolate->heap()->CreateCode(
         desc,
-        Code::STUB,
+        CodeKind::FOR_TESTING,
         Handle<Code>())->ToObjectChecked();
     CHECK(code->IsCode());
 #ifdef DEBUG
-    Code::cast(code)->Print(isolate);
+    Code::cast(code)->Print();
 #endif
     auto f = GeneratedCode<F_piiii>::FromCode(*code);
     t.a = 1.5;
@@ -379,7 +371,7 @@ TEST(5) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  Assembler assm(Assembler::Options{}, nullptr, 0);
+  Assembler assm(AssemblerOptions{});
 
   if (CpuFeatures::IsSupported(ARMv7)) {
     CpuFeatures::Scope scope(ARMv7);
@@ -393,13 +385,13 @@ TEST(5) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Object* code = isolate->heap()->CreateCode(
+    Object code = isolate->heap()->CreateCode(
         desc,
-        Code::STUB,
+        CodeKind::FOR_TESTING,
         Handle<Code>())->ToObjectChecked();
     CHECK(code->IsCode());
 #ifdef DEBUG
-    Code::cast(code)->Print(isolate);
+    Code::cast(code)->Print();
 #endif
     auto f = GeneratedCode<F_iiiii>::FromCode(*code);
     int res = reinterpret_cast<int>(f.Call(0xAAAAAAAA, 0, 0, 0, 0));
@@ -415,7 +407,7 @@ TEST(6) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  Assembler assm(Assembler::Options{}, nullptr, 0);
+  Assembler assm(AssemblerOptions{});
 
   if (CpuFeatures::IsSupported(ARMv7)) {
     CpuFeatures::Scope scope(ARMv7);
@@ -428,13 +420,13 @@ TEST(6) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Object* code = isolate->heap()->CreateCode(
+    Object code = isolate->heap()->CreateCode(
         desc,
-        Code::STUB,
+        CodeKind::FOR_TESTING,
         Handle<Code>())->ToObjectChecked();
     CHECK(code->IsCode());
 #ifdef DEBUG
-    Code::cast(code)->Print(isolate);
+    Code::cast(code)->Print();
 #endif
     auto f = GeneratedCode<F_iiiii>::FromCode(*code);
     int res = reinterpret_cast<int>(f.Call(0xFFFF, 0, 0, 0, 0));
@@ -457,7 +449,7 @@ static void TestRoundingMode(VCVTTypes types,
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  Assembler assm(Assembler::Options{}, nullptr, 0);
+  Assembler assm(AssemblerOptions{});
 
   if (CpuFeatures::IsSupported(VFP3)) {
     CpuFeatures::Scope scope(VFP3);
@@ -503,13 +495,13 @@ static void TestRoundingMode(VCVTTypes types,
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Object* code = isolate->heap()->CreateCode(
+    Object code = isolate->heap()->CreateCode(
         desc,
-        Code::STUB,
+        CodeKind::FOR_TESTING,
         Handle<Code>())->ToObjectChecked();
     CHECK(code->IsCode());
 #ifdef DEBUG
-    Code::cast(code)->Print(isolate);
+    Code::cast(code)->Print();
 #endif
     auto f = GeneratedCode<F_iiiii>::FromCode(*code);
     int res = reinterpret_cast<int>(f.Call(0, 0, 0, 0, 0));
@@ -635,7 +627,7 @@ TEST(8) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  typedef struct {
+  struct D {
     double a;
     double b;
     double c;
@@ -644,10 +636,10 @@ TEST(8) {
     double f;
     double g;
     double h;
-  } D;
+  };
   D d;
 
-  typedef struct {
+  struct F {
     float a;
     float b;
     float c;
@@ -656,12 +648,12 @@ TEST(8) {
     float f;
     float g;
     float h;
-  } F;
+  };
   F f;
 
   // Create a function that uses vldm/vstm to move some double and
   // single precision values around in memory.
-  Assembler assm(Assembler::Options{}, nullptr, 0);
+  Assembler assm(AssemblerOptions{});
 
   if (CpuFeatures::IsSupported(VFP2)) {
     CpuFeatures::Scope scope(VFP2);
@@ -690,13 +682,13 @@ TEST(8) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Object* code = isolate->heap()->CreateCode(
+    Object code = isolate->heap()->CreateCode(
         desc,
-        Code::STUB,
+        CodeKind::FOR_TESTING,
         Handle<Code>())->ToObjectChecked();
     CHECK(code->IsCode());
 #ifdef DEBUG
-    Code::cast(code)->Print(isolate);
+    Code::cast(code)->Print();
 #endif
     auto fn = GeneratedCode<F_ppiii>::FromCode(*code);
     d.a = 1.1;
@@ -746,7 +738,7 @@ TEST(9) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  typedef struct {
+  struct D {
     double a;
     double b;
     double c;
@@ -755,10 +747,10 @@ TEST(9) {
     double f;
     double g;
     double h;
-  } D;
+  };
   D d;
 
-  typedef struct {
+  struct F {
     float a;
     float b;
     float c;
@@ -767,12 +759,12 @@ TEST(9) {
     float f;
     float g;
     float h;
-  } F;
+  };
   F f;
 
   // Create a function that uses vldm/vstm to move some double and
   // single precision values around in memory.
-  Assembler assm(Assembler::Options{}, nullptr, 0);
+  Assembler assm(AssemblerOptions{});
 
   if (CpuFeatures::IsSupported(VFP2)) {
     CpuFeatures::Scope scope(VFP2);
@@ -805,13 +797,13 @@ TEST(9) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Object* code = isolate->heap()->CreateCode(
+    Object code = isolate->heap()->CreateCode(
         desc,
-        Code::STUB,
+        CodeKind::FOR_TESTING,
         Handle<Code>())->ToObjectChecked();
     CHECK(code->IsCode());
 #ifdef DEBUG
-    Code::cast(code)->Print(isolate);
+    Code::cast(code)->Print();
 #endif
     auto fn = GeneratedCode<F_ppiii>::FromCode(*code);
     d.a = 1.1;
@@ -861,7 +853,7 @@ TEST(10) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  typedef struct {
+  struct D {
     double a;
     double b;
     double c;
@@ -870,10 +862,10 @@ TEST(10) {
     double f;
     double g;
     double h;
-  } D;
+  };
   D d;
 
-  typedef struct {
+  struct F {
     float a;
     float b;
     float c;
@@ -882,12 +874,12 @@ TEST(10) {
     float f;
     float g;
     float h;
-  } F;
+  };
   F f;
 
   // Create a function that uses vldm/vstm to move some double and
   // single precision values around in memory.
-  Assembler assm(Assembler::Options{}, nullptr, 0);
+  Assembler assm(AssemblerOptions{});
 
   if (CpuFeatures::IsSupported(VFP2)) {
     CpuFeatures::Scope scope(VFP2);
@@ -916,13 +908,13 @@ TEST(10) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Object* code = isolate->heap()->CreateCode(
+    Object code = isolate->heap()->CreateCode(
         desc,
-        Code::STUB,
+        CodeKind::FOR_TESTING,
         Handle<Code>())->ToObjectChecked();
     CHECK(code->IsCode());
 #ifdef DEBUG
-    Code::cast(code)->Print(isolate);
+    Code::cast(code)->Print();
 #endif
     auto fn = GeneratedCode<F_ppiii>::FromCode(*code);
     d.a = 1.1;
@@ -972,18 +964,18 @@ TEST(11) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  typedef struct {
+  struct I {
     int32_t a;
     int32_t b;
     int32_t c;
     int32_t d;
-  } I;
+  };
   I i;
 
   i.a = 0xABCD0001;
   i.b = 0xABCD0000;
 
-  Assembler assm(Assembler::Options{}, nullptr, 0);
+  Assembler assm(AssemblerOptions{});
 
   // Test HeapObject untagging.
   __ ldr(r1, MemOperand(r0, offsetof(I, a)));
@@ -1013,13 +1005,13 @@ TEST(11) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Object* code = isolate->heap()->CreateCode(
+  Object code = isolate->heap()->CreateCode(
       desc,
-      Code::STUB,
+      CodeKind::FOR_TESTING,
       Handle<Code>())->ToObjectChecked();
   CHECK(code->IsCode());
 #ifdef DEBUG
-  Code::cast(code)->Print(isolate);
+  Code::cast(code)->Print();
 #endif
   auto f = GeneratedCode<F_piiii>::FromCode(*code);
   f.Call(&i, 0, 0, 0, 0);
@@ -1037,7 +1029,7 @@ TEST(12) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
 
-  Assembler assm(Assembler::Options{}, nullptr, 0);
+  Assembler assm(AssemblerOptions{});
   Label target;
   __ b(eq, &target);
   __ b(ne, &target);
@@ -1045,6 +1037,51 @@ TEST(12) {
   __ nop();
 }
 #endif
+
+TEST(WordSizedVectorInstructions) {
+  CcTest::InitializeVM();
+  Isolate* isolate = CcTest::i_isolate();
+  HandleScope scope(isolate);
+
+  Assembler assm(AssemblerOptions{});
+  // Testing word sized vector operations.
+  __ li(r0, Operand(5));  // v0 = {5, 5, 5, 5}
+  __ mtvsrd(v0, r0);
+  __ vspltw(v0, v0, Operand(1));
+
+  // Integer
+  __ vadduwm(v1, v0, v0);   // v1 = {10, 10, 10, 10}
+  __ vmuluwm(v2, v0, v1);   // v2 = {50, 50, 50, 50}
+  __ vsubuhm(v3, v2, v0);   // v3 = {45, 45, 45, 45}
+  __ vslw(v4, v2, v0);      // v4 = {1600, 1600, 1600, 1600}
+  __ vsrw(v5, v2, v0);      // v5 = {1, 1, 1, 1}
+  __ vmaxsw(v4, v5, v4);    // v4 = unchanged
+  __ vcmpgtuw(v5, v2, v3);  // v5 = all 1s
+  __ vand(v4, v4, v5);      // v4 = unchanged
+  // FP
+  __ xvcvsxwsp(v1, v1);    // v1 = Converted to SP
+  __ xvcvsxwsp(v4, v4);    // v4 = Converted to SP
+  __ xvdivsp(v4, v4, v1);  // v4 = {160, 160, 160, 160}
+  // Integer
+  __ xvcvspuxws(v4, v4);  // v4 = Converted to Int
+  __ vor(v0, v4, v3);     // v0 = {173, 173, 173, 173}
+
+  __ vupkhsw(v0, v0);  // v0 = {173, 173}
+  __ mfvsrd(r3, v0);
+  __ blr();
+
+  CodeDesc desc;
+  assm.GetCode(isolate, &desc);
+  Handle<Code> code =
+      Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
+#ifdef DEBUG
+  code->Print();
+#endif
+  auto f = GeneratedCode<F_iiiii>::FromCode(*code);
+  intptr_t res = reinterpret_cast<intptr_t>(f.Call(0, 0, 0, 0, 0));
+  ::printf("f() = %" V8PRIdPTR "\n", res);
+  CHECK_EQ(173, static_cast<int>(res));
+}
 
 #undef __
 

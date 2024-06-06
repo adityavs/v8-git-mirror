@@ -4,8 +4,7 @@
 
 // Flags: --expose-wasm --expose-gc --verify-heap
 
-load("test/mjsunit/wasm/wasm-constants.js");
-load("test/mjsunit/wasm/wasm-module-builder.js");
+d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 const verifyHeap = gc;
 let globalCounter = 10000000;

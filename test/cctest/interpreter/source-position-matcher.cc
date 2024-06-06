@@ -4,8 +4,8 @@
 
 #include "test/cctest/interpreter/source-position-matcher.h"
 
-#include "src/objects-inl.h"
-#include "src/objects.h"
+#include "src/objects/objects-inl.h"
+#include "src/objects/objects.h"
 
 namespace v8 {
 namespace internal {
@@ -117,8 +117,6 @@ bool SourcePositionMatcher::Match(Handle<BytecodeArray> original_bytecode,
     // equivalent? e.g. before a bytecode that has debugger observable
     // effects. This is likely non-trivial.
   }
-
-  return true;
 }
 
 bool SourcePositionMatcher::HasNewExpressionPositionsInOptimized(

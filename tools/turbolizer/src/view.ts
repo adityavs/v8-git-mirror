@@ -2,37 +2,32 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-"use strict";
+export abstract class View {
+  protected container: HTMLElement;
+  protected divNode: HTMLElement;
+  protected abstract createViewElement(): HTMLElement;
 
-abstract class View {
-  container: HTMLElement;
-  divNode: HTMLElement;
-  abstract initializeContent(data: any, rememberedSelection: Selection): void;
-  abstract createViewElement(): HTMLElement;
-  abstract deleteContent(): void;
-  abstract detachSelection(): Set<string>;
-
-  constructor(id) {
-    this.container = document.getElementById(id);
+  constructor(idOrContainer: string | HTMLElement) {
+    this.container = typeof idOrContainer == "string" ? document.getElementById(idOrContainer) : idOrContainer;
     this.divNode = this.createViewElement();
   }
 
-  isScrollable(): boolean {
-    return false;
-  }
-
-  show(data, rememberedSelection): void {
+  public show(): void {
     this.container.appendChild(this.divNode);
-    this.initializeContent(data, rememberedSelection);
   }
 
-  hide(): void {
-    this.deleteContent();
+  public hide(): void {
     this.container.removeChild(this.divNode);
   }
 }
 
-interface PhaseView {
-  onresize();
-  searchInputAction(searchInput: HTMLInputElement, e: Event);
+export abstract class PhaseView extends View {
+  public abstract initializeContent(data: any, rememberedSelection: Set<any>): void;
+  public abstract detachSelection(): Set<string>;
+  public abstract onresize(): void;
+  public abstract searchInputAction(searchInput: HTMLInputElement, e: Event, onlyVisible: boolean): void;
+
+  constructor(idOrContainer: string | HTMLElement) {
+    super(idOrContainer);
+  }
 }

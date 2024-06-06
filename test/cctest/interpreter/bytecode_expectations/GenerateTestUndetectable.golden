@@ -12,25 +12,24 @@ snippet: "
   if (obj_a == null) { b = 20;}
   return b;
 "
-frame size: 3
+frame size: 2
 parameter count: 1
-bytecode array length: 25
+bytecode array length: 19
 bytecodes: [
-  /*   30 E> */ B(StackCheck),
-  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41), R(2),
-                B(Mov), R(2), R(0),
+  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41),
+                B(Star0),
   /*   63 S> */ B(LdaSmi), I8(10),
-                B(Star), R(1),
+                B(Star1),
   /*   67 S> */ B(Ldar), R(0),
                 B(TestUndetectable),
-                B(JumpIfFalse), U8(6),
+                B(JumpIfFalse), U8(5),
   /*   88 S> */ B(LdaSmi), I8(20),
-                B(Star), R(1),
+                B(Star1),
   /*   97 S> */ B(Ldar), R(1),
   /*  106 S> */ B(Return),
 ]
 constant pool: [
-  BOILERPLATE_DESCRIPTION_TYPE,
+  OBJECT_BOILERPLATE_DESCRIPTION_TYPE,
 ]
 handlers: [
 ]
@@ -42,25 +41,24 @@ snippet: "
   if (obj_a == undefined) { b = 20;}
   return b;
 "
-frame size: 3
+frame size: 2
 parameter count: 1
-bytecode array length: 25
+bytecode array length: 19
 bytecodes: [
-  /*   30 E> */ B(StackCheck),
-  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41), R(2),
-                B(Mov), R(2), R(0),
+  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41),
+                B(Star0),
   /*   63 S> */ B(LdaSmi), I8(10),
-                B(Star), R(1),
+                B(Star1),
   /*   67 S> */ B(Ldar), R(0),
                 B(TestUndetectable),
-                B(JumpIfFalse), U8(6),
+                B(JumpIfFalse), U8(5),
   /*   93 S> */ B(LdaSmi), I8(20),
-                B(Star), R(1),
+                B(Star1),
   /*  102 S> */ B(Ldar), R(1),
   /*  111 S> */ B(Return),
 ]
 constant pool: [
-  BOILERPLATE_DESCRIPTION_TYPE,
+  OBJECT_BOILERPLATE_DESCRIPTION_TYPE,
 ]
 handlers: [
 ]
@@ -72,25 +70,24 @@ snippet: "
   if (obj_a != null) { b = 20;}
   return b;
 "
-frame size: 3
+frame size: 2
 parameter count: 1
-bytecode array length: 25
+bytecode array length: 19
 bytecodes: [
-  /*   30 E> */ B(StackCheck),
-  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41), R(2),
-                B(Mov), R(2), R(0),
+  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41),
+                B(Star0),
   /*   63 S> */ B(LdaSmi), I8(10),
-                B(Star), R(1),
+                B(Star1),
   /*   67 S> */ B(Ldar), R(0),
                 B(TestUndetectable),
-                B(JumpIfTrue), U8(6),
+                B(JumpIfTrue), U8(5),
   /*   88 S> */ B(LdaSmi), I8(20),
-                B(Star), R(1),
+                B(Star1),
   /*   97 S> */ B(Ldar), R(1),
   /*  106 S> */ B(Return),
 ]
 constant pool: [
-  BOILERPLATE_DESCRIPTION_TYPE,
+  OBJECT_BOILERPLATE_DESCRIPTION_TYPE,
 ]
 handlers: [
 ]
@@ -102,25 +99,24 @@ snippet: "
   if (obj_a != undefined) { b = 20;}
   return b;
 "
-frame size: 3
+frame size: 2
 parameter count: 1
-bytecode array length: 25
+bytecode array length: 19
 bytecodes: [
-  /*   30 E> */ B(StackCheck),
-  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41), R(2),
-                B(Mov), R(2), R(0),
+  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41),
+                B(Star0),
   /*   63 S> */ B(LdaSmi), I8(10),
-                B(Star), R(1),
+                B(Star1),
   /*   67 S> */ B(Ldar), R(0),
                 B(TestUndetectable),
-                B(JumpIfTrue), U8(6),
+                B(JumpIfTrue), U8(5),
   /*   93 S> */ B(LdaSmi), I8(20),
-                B(Star), R(1),
+                B(Star1),
   /*  102 S> */ B(Ldar), R(1),
   /*  111 S> */ B(Return),
 ]
 constant pool: [
-  BOILERPLATE_DESCRIPTION_TYPE,
+  OBJECT_BOILERPLATE_DESCRIPTION_TYPE,
 ]
 handlers: [
 ]
@@ -132,24 +128,23 @@ snippet: "
   if (obj_a === null) { b = 20;}
   return b;
 "
-frame size: 3
+frame size: 2
 parameter count: 1
-bytecode array length: 24
+bytecode array length: 18
 bytecodes: [
-  /*   30 E> */ B(StackCheck),
-  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41), R(2),
-                B(Mov), R(2), R(0),
+  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41),
+                B(Star0),
   /*   63 S> */ B(LdaSmi), I8(10),
-                B(Star), R(1),
+                B(Star1),
   /*   67 S> */ B(Ldar), R(0),
-                B(JumpIfNotNull), U8(6),
+                B(JumpIfNotNull), U8(5),
   /*   89 S> */ B(LdaSmi), I8(20),
-                B(Star), R(1),
+                B(Star1),
   /*   98 S> */ B(Ldar), R(1),
   /*  107 S> */ B(Return),
 ]
 constant pool: [
-  BOILERPLATE_DESCRIPTION_TYPE,
+  OBJECT_BOILERPLATE_DESCRIPTION_TYPE,
 ]
 handlers: [
 ]
@@ -161,24 +156,23 @@ snippet: "
   if (obj_a === undefined) { b = 20;}
   return b;
 "
-frame size: 3
+frame size: 2
 parameter count: 1
-bytecode array length: 24
+bytecode array length: 18
 bytecodes: [
-  /*   30 E> */ B(StackCheck),
-  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41), R(2),
-                B(Mov), R(2), R(0),
+  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41),
+                B(Star0),
   /*   63 S> */ B(LdaSmi), I8(10),
-                B(Star), R(1),
+                B(Star1),
   /*   67 S> */ B(Ldar), R(0),
-                B(JumpIfNotUndefined), U8(6),
+                B(JumpIfNotUndefined), U8(5),
   /*   94 S> */ B(LdaSmi), I8(20),
-                B(Star), R(1),
+                B(Star1),
   /*  103 S> */ B(Ldar), R(1),
   /*  112 S> */ B(Return),
 ]
 constant pool: [
-  BOILERPLATE_DESCRIPTION_TYPE,
+  OBJECT_BOILERPLATE_DESCRIPTION_TYPE,
 ]
 handlers: [
 ]
@@ -190,24 +184,23 @@ snippet: "
   if (obj_a !== null) { b = 20;}
   return b;
 "
-frame size: 3
+frame size: 2
 parameter count: 1
-bytecode array length: 24
+bytecode array length: 18
 bytecodes: [
-  /*   30 E> */ B(StackCheck),
-  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41), R(2),
-                B(Mov), R(2), R(0),
+  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41),
+                B(Star0),
   /*   63 S> */ B(LdaSmi), I8(10),
-                B(Star), R(1),
+                B(Star1),
   /*   67 S> */ B(Ldar), R(0),
-                B(JumpIfNull), U8(6),
+                B(JumpIfNull), U8(5),
   /*   89 S> */ B(LdaSmi), I8(20),
-                B(Star), R(1),
+                B(Star1),
   /*   98 S> */ B(Ldar), R(1),
   /*  107 S> */ B(Return),
 ]
 constant pool: [
-  BOILERPLATE_DESCRIPTION_TYPE,
+  OBJECT_BOILERPLATE_DESCRIPTION_TYPE,
 ]
 handlers: [
 ]
@@ -219,24 +212,23 @@ snippet: "
   if (obj_a !== undefined) { b = 20;}
   return b;
 "
-frame size: 3
+frame size: 2
 parameter count: 1
-bytecode array length: 24
+bytecode array length: 18
 bytecodes: [
-  /*   30 E> */ B(StackCheck),
-  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41), R(2),
-                B(Mov), R(2), R(0),
+  /*   46 S> */ B(CreateObjectLiteral), U8(0), U8(0), U8(41),
+                B(Star0),
   /*   63 S> */ B(LdaSmi), I8(10),
-                B(Star), R(1),
+                B(Star1),
   /*   67 S> */ B(Ldar), R(0),
-                B(JumpIfUndefined), U8(6),
+                B(JumpIfUndefined), U8(5),
   /*   94 S> */ B(LdaSmi), I8(20),
-                B(Star), R(1),
+                B(Star1),
   /*  103 S> */ B(Ldar), R(1),
   /*  112 S> */ B(Return),
 ]
 constant pool: [
-  BOILERPLATE_DESCRIPTION_TYPE,
+  OBJECT_BOILERPLATE_DESCRIPTION_TYPE,
 ]
 handlers: [
 ]

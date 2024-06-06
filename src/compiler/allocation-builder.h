@@ -18,25 +18,16 @@ namespace compiler {
 // allocated object and also provides helpers for commonly allocated objects.
 class AllocationBuilder final {
  public:
-  AllocationBuilder(JSGraph* jsgraph, const JSHeapBroker* js_heap_broker,
-                    Node* effect, Node* control)
+  AllocationBuilder(JSGraph* jsgraph, Node* effect, Node* control)
       : jsgraph_(jsgraph),
-        js_heap_broker_(js_heap_broker),
         allocation_(nullptr),
         effect_(effect),
         control_(control) {}
 
   // Primitive allocation of static size.
-  void Allocate(int size, PretenureFlag pretenure = NOT_TENURED,
-                Type type = Type::Any()) {
-    DCHECK_LE(size, kMaxRegularHeapObjectSize);
-    effect_ = graph()->NewNode(
-        common()->BeginRegion(RegionObservability::kNotObservable), effect_);
-    allocation_ =
-        graph()->NewNode(simplified()->Allocate(type, pretenure),
-                         jsgraph()->Constant(size), effect_, control_);
-    effect_ = allocation_;
-  }
+  inline void Allocate(int size,
+                       AllocationType allocation = AllocationType::kYoung,
+                       Type type = Type::Any());
 
   // Primitive store into a field.
   void Store(const FieldAccess& access, Node* value) {
@@ -51,35 +42,26 @@ class AllocationBuilder final {
   }
 
   // Compound allocation of a context.
-  void AllocateContext(int length, Handle<Map> map) {
-    DCHECK(map->instance_type() >= BLOCK_CONTEXT_TYPE &&
-           map->instance_type() <= WITH_CONTEXT_TYPE);
-    int size = FixedArray::SizeFor(length);
-    Allocate(size, NOT_TENURED, Type::OtherInternal());
-    Store(AccessBuilder::ForMap(), map);
-    Store(AccessBuilder::ForFixedArrayLength(), jsgraph()->Constant(length));
-  }
+  inline void AllocateContext(int variadic_part_length, MapRef map);
 
   // Compound allocation of a FixedArray.
-  void AllocateArray(int length, Handle<Map> map,
-                     PretenureFlag pretenure = NOT_TENURED) {
-    DCHECK(map->instance_type() == FIXED_ARRAY_TYPE ||
-           map->instance_type() == FIXED_DOUBLE_ARRAY_TYPE);
-    int size = (map->instance_type() == FIXED_ARRAY_TYPE)
-                   ? FixedArray::SizeFor(length)
-                   : FixedDoubleArray::SizeFor(length);
-    Allocate(size, pretenure, Type::OtherInternal());
-    Store(AccessBuilder::ForMap(), map);
-    Store(AccessBuilder::ForFixedArrayLength(), jsgraph()->Constant(length));
-  }
+  inline bool CanAllocateArray(
+      int length, MapRef map,
+      AllocationType allocation = AllocationType::kYoung);
+  inline void AllocateArray(int length, MapRef map,
+                            AllocationType allocation = AllocationType::kYoung);
+
+  // Compound allocation of a SloppyArgumentsElements
+  inline bool CanAllocateSloppyArgumentElements(
+      int length, MapRef map,
+      AllocationType allocation = AllocationType::kYoung);
+  inline void AllocateSloppyArgumentElements(
+      int length, MapRef map,
+      AllocationType allocation = AllocationType::kYoung);
 
   // Compound store of a constant into a field.
-  void Store(const FieldAccess& access, Handle<Object> value) {
-    Store(access, jsgraph()->Constant(value));
-  }
-  // Compound store of a constant into a field.
   void Store(const FieldAccess& access, const ObjectRef& value) {
-    Store(access, jsgraph()->Constant(js_heap_broker(), value));
+    Store(access, jsgraph()->Constant(value));
   }
 
   void FinishAndChange(Node* node) {
@@ -96,7 +78,6 @@ class AllocationBuilder final {
 
  protected:
   JSGraph* jsgraph() { return jsgraph_; }
-  const JSHeapBroker* js_heap_broker() { return js_heap_broker_; }
   Isolate* isolate() const { return jsgraph_->isolate(); }
   Graph* graph() { return jsgraph_->graph(); }
   CommonOperatorBuilder* common() { return jsgraph_->common(); }
@@ -104,7 +85,6 @@ class AllocationBuilder final {
 
  private:
   JSGraph* const jsgraph_;
-  const JSHeapBroker* const js_heap_broker_;
   Node* allocation_;
   Node* effect_;
   Node* control_;

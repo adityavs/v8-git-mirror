@@ -28,19 +28,14 @@
 #include <stdio.h>
 #include <cstring>
 
-#include "src/v8.h"
+#include "src/codegen/arm64/assembler-arm64.h"
+#include "src/codegen/arm64/decoder-arm64-inl.h"
+#include "src/codegen/arm64/utils-arm64.h"
+#include "src/codegen/macro-assembler-inl.h"
+#include "src/diagnostics/arm64/disasm-arm64.h"
+#include "src/execution/frames-inl.h"
+#include "src/init/v8.h"
 #include "test/cctest/cctest.h"
-
-#include "src/macro-assembler.h"
-
-#include "src/frames-inl.h"
-
-#include "src/arm64/assembler-arm64.h"
-#include "src/arm64/decoder-arm64-inl.h"
-#include "src/arm64/disasm-arm64.h"
-#include "src/arm64/macro-assembler-arm64-inl.h"
-#include "src/arm64/macro-assembler-arm64.h"
-#include "src/arm64/utils-arm64.h"
 
 namespace v8 {
 namespace internal {
@@ -49,35 +44,40 @@ namespace internal {
 
 #define EXP_SIZE   (256)
 #define INSTR_SIZE (1024)
-#define SET_UP_MASM()                                                    \
-  InitializeVM();                                                        \
-  Isolate* isolate = CcTest::i_isolate();                                \
-  HandleScope scope(isolate);                                            \
-  byte* buf = static_cast<byte*>(malloc(INSTR_SIZE));                    \
-  uint32_t encoding = 0;                                                 \
-  MacroAssembler* assm = new MacroAssembler(                             \
-      isolate, buf, INSTR_SIZE, v8::internal::CodeObjectRequired::kYes); \
-  Decoder<DispatchingDecoderVisitor>* decoder =                          \
-      new Decoder<DispatchingDecoderVisitor>();                          \
-  DisassemblingDecoder* disasm = new DisassemblingDecoder();             \
-  decoder->AppendVisitor(disasm)
-
-#define SET_UP_ASM()                                                      \
+#define SET_UP_MASM()                                                     \
   InitializeVM();                                                         \
   Isolate* isolate = CcTest::i_isolate();                                 \
   HandleScope scope(isolate);                                             \
   byte* buf = static_cast<byte*>(malloc(INSTR_SIZE));                     \
   uint32_t encoding = 0;                                                  \
-  Assembler* assm = new Assembler(Assembler::Options{}, buf, INSTR_SIZE); \
+  MacroAssembler* assm =                                                  \
+      new MacroAssembler(isolate, v8::internal::CodeObjectRequired::kYes, \
+                         ExternalAssemblerBuffer(buf, INSTR_SIZE));       \
   Decoder<DispatchingDecoderVisitor>* decoder =                           \
       new Decoder<DispatchingDecoderVisitor>();                           \
   DisassemblingDecoder* disasm = new DisassemblingDecoder();              \
   decoder->AppendVisitor(disasm)
 
+#define SET_UP_ASM()                                                         \
+  InitializeVM();                                                            \
+  Isolate* isolate = CcTest::i_isolate();                                    \
+  HandleScope scope(isolate);                                                \
+  byte* buf = static_cast<byte*>(malloc(INSTR_SIZE));                        \
+  uint32_t encoding = 0;                                                     \
+  Assembler* assm = new Assembler(AssemblerOptions{},                        \
+                                  ExternalAssemblerBuffer(buf, INSTR_SIZE)); \
+  Decoder<DispatchingDecoderVisitor>* decoder =                              \
+      new Decoder<DispatchingDecoderVisitor>();                              \
+  DisassemblingDecoder* disasm = new DisassemblingDecoder();                 \
+  decoder->AppendVisitor(disasm)
+
 #define COMPARE(ASM, EXP)                                                \
   assm->Reset();                                                         \
   assm->ASM;                                                             \
-  assm->GetCode(isolate, nullptr);                                       \
+  {                                                                      \
+    CodeDesc desc;                                                       \
+    assm->GetCode(isolate, &desc);                                       \
+  }                                                                      \
   decoder->Decode(reinterpret_cast<Instruction*>(buf));                  \
   encoding = *reinterpret_cast<uint32_t*>(buf);                          \
   if (strcmp(disasm->GetOutput(), EXP) != 0) {                           \
@@ -89,7 +89,10 @@ namespace internal {
 #define COMPARE_PREFIX(ASM, EXP)                                         \
   assm->Reset();                                                         \
   assm->ASM;                                                             \
-  assm->GetCode(isolate, nullptr);                                       \
+  {                                                                      \
+    CodeDesc desc;                                                       \
+    assm->GetCode(isolate, &desc);                                       \
+  }                                                                      \
   decoder->Decode(reinterpret_cast<Instruction*>(buf));                  \
   encoding = *reinterpret_cast<uint32_t*>(buf);                          \
   if (strncmp(disasm->GetOutput(), EXP, strlen(EXP)) != 0) {             \
@@ -799,6 +802,13 @@ TEST_(dp_2_source) {
 TEST_(adr) {
   SET_UP_ASM();
 
+  char expected[100];
+  snprintf(expected, sizeof(expected), "adr x0, #+0x0 (addr %p)", buf);
+  COMPARE(adr(x0, 0), expected);
+  snprintf(expected, sizeof(expected), "adr x0, #+0x1 (addr %p)", buf + 1);
+  COMPARE(adr(x0, 1), expected);
+  snprintf(expected, sizeof(expected), "adr x0, #-0x1 (addr %p)", buf - 1);
+  COMPARE(adr(x0, -1), expected);
   COMPARE_PREFIX(adr(x0, 0), "adr x0, #+0x0");
   COMPARE_PREFIX(adr(x1, 1), "adr x1, #+0x1");
   COMPARE_PREFIX(adr(x2, -1), "adr x2, #-0x1");
@@ -815,7 +825,7 @@ TEST_(adr) {
 TEST_(branch) {
   SET_UP_ASM();
 
-  #define INST_OFF(x) ((x) >> kInstructionSizeLog2)
+#define INST_OFF(x) ((x) >> kInstrSizeLog2)
   COMPARE_PREFIX(b(INST_OFF(0x4)), "b #+0x4");
   COMPARE_PREFIX(b(INST_OFF(-0x4)), "b #-0x4");
   COMPARE_PREFIX(b(INST_OFF(0x7fffffc)), "b #+0x7fffffc");
@@ -840,10 +850,11 @@ TEST_(branch) {
   COMPARE_PREFIX(tbnz(w10, 31, INST_OFF(0)), "tbnz w10, #31, #+0x0");
   COMPARE_PREFIX(tbnz(x11, 31, INST_OFF(0x4)), "tbnz w11, #31, #+0x4");
   COMPARE_PREFIX(tbnz(x12, 32, INST_OFF(0x8)), "tbnz x12, #32, #+0x8");
+#undef INST_OFF
   COMPARE(br(x0), "br x0");
   COMPARE(blr(x1), "blr x1");
   COMPARE(ret(x2), "ret x2");
-  COMPARE(ret(lr), "ret")
+  COMPARE(ret(lr), "ret");
 
   CLEANUP();
 }
@@ -1791,6 +1802,7 @@ TEST_(fcvt_scvtf_ucvtf) {
   COMPARE(fcvtzs(x4, s3, 15), "fcvtzs x4, s3, #15");
   COMPARE(fcvtzs(w6, d5, 32), "fcvtzs w6, d5, #32");
   COMPARE(fcvtzs(w6, s5, 32), "fcvtzs w6, s5, #32");
+  COMPARE(fjcvtzs(w0, d1), "fjcvtzs w0, d1");
   COMPARE(fcvtzu(w2, d1, 1), "fcvtzu w2, d1, #1");
   COMPARE(fcvtzu(w2, s1, 1), "fcvtzu w2, s1, #1");
   COMPARE(fcvtzu(x4, d3, 15), "fcvtzu x4, d3, #15");
@@ -1863,13 +1875,57 @@ TEST_(system_msr) {
 
 
 TEST_(system_nop) {
+  {
+    SET_UP_ASM();
+    COMPARE(nop(), "nop");
+    CLEANUP();
+  }
+  {
+    SET_UP_MASM();
+    COMPARE(Nop(), "nop");
+    CLEANUP();
+  }
+}
+
+TEST_(bti) {
+  {
+    SET_UP_ASM();
+
+    COMPARE(bti(BranchTargetIdentifier::kBti), "bti");
+    COMPARE(bti(BranchTargetIdentifier::kBtiCall), "bti c");
+    COMPARE(bti(BranchTargetIdentifier::kBtiJump), "bti j");
+    COMPARE(bti(BranchTargetIdentifier::kBtiJumpCall), "bti jc");
+    COMPARE(hint(BTI), "bti");
+    COMPARE(hint(BTI_c), "bti c");
+    COMPARE(hint(BTI_j), "bti j");
+    COMPARE(hint(BTI_jc), "bti jc");
+
+    CLEANUP();
+  }
+
+  {
+    SET_UP_MASM();
+
+    Label dummy1, dummy2, dummy3, dummy4;
+    COMPARE(Bind(&dummy1, BranchTargetIdentifier::kBti), "bti");
+    COMPARE(Bind(&dummy2, BranchTargetIdentifier::kBtiCall), "bti c");
+    COMPARE(Bind(&dummy3, BranchTargetIdentifier::kBtiJump), "bti j");
+    COMPARE(Bind(&dummy4, BranchTargetIdentifier::kBtiJumpCall), "bti jc");
+
+    CLEANUP();
+  }
+}
+
+TEST(system_pauth) {
   SET_UP_ASM();
 
-  COMPARE(nop(), "nop");
+  COMPARE(pacib1716(), "pacib1716");
+  COMPARE(pacibsp(), "pacibsp");
+  COMPARE(autib1716(), "autib1716");
+  COMPARE(autibsp(), "autibsp");
 
   CLEANUP();
 }
-
 
 TEST_(debug) {
   InitializeVM();
@@ -1880,9 +1936,14 @@ TEST_(debug) {
     HandleScope scope(isolate);
     byte* buf = static_cast<byte*>(malloc(INSTR_SIZE));
     uint32_t encoding = 0;
-    Assembler::Options options;
+    AssemblerOptions options;
+#ifdef USE_SIMULATOR
     options.enable_simulator_code = (i == 1);
-    Assembler* assm = new Assembler(options, buf, INSTR_SIZE);
+#else
+    CHECK(!options.enable_simulator_code);
+#endif
+    Assembler* assm =
+        new Assembler(options, ExternalAssemblerBuffer(buf, INSTR_SIZE));
     Decoder<DispatchingDecoderVisitor>* decoder =
         new Decoder<DispatchingDecoderVisitor>();
     DisassemblingDecoder* disasm = new DisassemblingDecoder();

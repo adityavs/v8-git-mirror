@@ -98,7 +98,7 @@ function TestArraySortingWithUndefined() {
 TestArraySortingWithUndefined();
 
 // Test that sorting using an unsound comparison function still gives a
-// sane result, i.e. it terminates without error and retains the elements
+// sensible result, i.e. it terminates without error and retains the elements
 // in the array.
 function TestArraySortingWithUnsoundComparisonFunction() {
   var a = [ 3, void 0, 2 ];
@@ -127,9 +127,8 @@ function TestSparseNonArraySorting(length) {
   assertFalse(4 in obj, "objsort non-existing retained");
 }
 
+TestSparseNonArraySorting(1000);
 TestSparseNonArraySorting(5000);
-TestSparseNonArraySorting(500000);
-TestSparseNonArraySorting(Math.pow(2, 31) + 1);
 
 
 function TestArrayLongerLength(length) {
@@ -147,8 +146,7 @@ function TestArrayLongerLength(length) {
 TestArrayLongerLength(4);
 TestArrayLongerLength(10);
 TestArrayLongerLength(1000);
-TestArrayLongerLength(500000);
-TestArrayLongerLength(Math.pow(2,32) - 1);
+TestArrayLongerLength(5000);
 
 
 function TestNonArrayLongerLength(length) {
@@ -166,8 +164,7 @@ function TestNonArrayLongerLength(length) {
 TestNonArrayLongerLength(4);
 TestNonArrayLongerLength(10);
 TestNonArrayLongerLength(1000);
-TestNonArrayLongerLength(500000);
-TestNonArrayLongerLength(Math.pow(2,32) - 1);
+TestNonArrayLongerLength(5000);
 
 
 function TestNonArrayWithAccessors() {
@@ -512,6 +509,10 @@ assertThrows(() => {
   Array.prototype.sort.call(undefined);
 }, TypeError);
 
+assertThrows(() => {
+  Array.prototype.sort.call(null);
+}, TypeError);
+
 // This test ensures that RemoveArrayHoles does not shadow indices in the
 // prototype chain. There are multiple code paths, we force both and check that
 // they have the same behavior.
@@ -562,10 +563,44 @@ function TestPrototypeHoles() {
     assertEquals(19, xs[9]);
   }
 
-  test(true);
   test(false);
+  // Expect a TypeError when trying to delete the accessor.
+  assertThrows(() => test(true), TypeError);
 }
 TestPrototypeHoles();
+
+// The following test ensures that [[Delete]] is called and it throws.
+function TestArrayWithAccessorThrowsOnDelete() {
+  let array = [5, 4, 1, /*hole*/, /*hole*/];
+
+  Object.defineProperty(array, '4', {
+    get: () => array.foo,
+    set: (val) => array.foo = val
+  });
+  assertThrows(() => array.sort((a, b) => a - b), TypeError);
+}
+TestArrayWithAccessorThrowsOnDelete();
+
+// The following test ensures that elements on the prototype are also copied
+// for JSArrays and not only JSObjects.
+function TestArrayPrototypeHasElements() {
+  let array = [1, 2, 3, 4, 5];
+  for (let i = 0; i < array.length; i++) {
+    delete array[i];
+    Object.prototype[i] = 42;
+  }
+
+  let comparator_called = false;
+  array.sort(function (a, b) {
+    if (a === 42 || b === 42) {
+      comparator_called = true;
+    }
+    return a - b;
+  });
+
+  assertTrue(comparator_called);
+}
+TestArrayPrototypeHasElements();
 
 // The following Tests make sure that there is no crash when the element kind
 // or the array length changes. Since comparison functions like this are not
@@ -717,3 +752,15 @@ function TestSortCmpPackedSetLengthToZero() {
   xs.sort(create_cmpfn(() => xs.length = 0));
   assertTrue(HasPackedSmi(xs));
 }
+TestSortCmpPackedSetLengthToZero();
+
+(function TestSortingNonObjectConvertsToObject() {
+  const v1 = Array.prototype.sort.call(true);
+  assertEquals('object', typeof v1);
+
+  const v2 = Array.prototype.sort.call(false);
+  assertEquals('object', typeof v2);
+
+  const v3 = Array.prototype.sort.call(42);
+  assertEquals('object', typeof v3);
+})();

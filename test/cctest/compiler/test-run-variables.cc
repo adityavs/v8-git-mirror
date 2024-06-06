@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/api.h"
-#include "src/objects-inl.h"
+#include "src/api/api-inl.h"
+#include "src/objects/objects-inl.h"
 #include "test/cctest/compiler/function-tester.h"
 
 namespace v8 {
@@ -57,12 +57,12 @@ static const char* store_tests[] = {
     "'use strict'; let x = (a?4:5); x = a; r = x", "123", "0", nullptr};
 
 static void RunVariableTests(const char* source, const char* tests[]) {
-  EmbeddedVector<char, 512> buffer;
+  base::EmbeddedVector<char, 512> buffer;
 
   for (int i = 0; tests[i] != nullptr; i += 3) {
     SNPrintF(buffer, source, tests[i]);
-    PrintF("#%d: %s\n", i / 3, buffer.start());
-    FunctionTester T(buffer.start());
+    PrintF("#%d: %s\n", i / 3, buffer.begin());
+    FunctionTester T(buffer.begin());
 
     // Check function with non-falsey parameter.
     if (tests[i + 1] != throws) {

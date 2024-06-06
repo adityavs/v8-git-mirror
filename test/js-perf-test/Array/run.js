@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-load('../base.js');
+d8.file.execute('../base.js');
 
 let array;
 // Initialize func variable to ensure the first test doesn't benefit from
@@ -12,11 +12,13 @@ let this_arg;
 let result;
 const array_size = 100;
 const max_index = array_size - 1;
+// Matches what {FastSetup} below produces.
+const max_index_value = `value ${max_index}`;
 
-// mc stands for "Make Closure," it's a handy function to get a fresh
+// newClosure is a handy function to get a fresh
 // closure unpolluted by IC feedback for a 2nd-order array builtin
 // test.
-function mc(name, generic = false) {
+function newClosure(name, generic = false) {
   if (generic) {
     return new Function(
       `result = Array.prototype.${name}.call(array, func, this_arg);`);
@@ -24,16 +26,55 @@ function mc(name, generic = false) {
   return new Function(`result = array.${name}(func, this_arg);`);
 }
 
+function MakeHoley(array) {
+  for (let i =0; i < array.length; i+=2) {
+    delete array[i];
+  }
+  assert(%HasHoleyElements(array));
+}
+
 function SmiSetup() {
   array = Array.from({ length: array_size }, (_, i) => i);
+  assert(%HasSmiElements(array));
+}
+
+function HoleySmiSetup() {
+  SmiSetup();
+  MakeHoley(array);
+  assert(%HasSmiElements(array));
 }
 
 function DoubleSetup() {
   array = Array.from({ length: array_size }, (_, i) => i + 0.5);
+  assert(%HasDoubleElements(array));
+}
+
+function HoleyDoubleSetup() {
+  DoubleSetup();
+  MakeHoley(array);
+  assert(%HasDoubleElements(array));
 }
 
 function FastSetup() {
   array = Array.from({ length: array_size }, (_, i) => `value ${i}`);
+  assert(%HasObjectElements(array));
+}
+
+function HoleyFastSetup() {
+  FastSetup();
+  MakeHoley(array);
+  assert(%HasObjectElements(array));
+}
+
+function DictionarySetup() {
+  array = [];
+  // Add a large index to force dictionary elements.
+  array[2**30] = 10;
+  // Spread out {array_size} elements.
+  for (var i = 0; i < array_size-1; i++) {
+    array[i*101] = i;
+  }
+  assert(%HasDictionaryElements(array));
 }
 
 function ObjectSetup() {
@@ -41,15 +82,25 @@ function ObjectSetup() {
   for (var i = 0; i < array_size; i++) {
     array[i] = i;
   }
+  assert(%HasObjectElements(array));
+  assert(%HasHoleyElements(array));
+}
+
+
+const ARRAY_SETUP = {
+  PACKED_SMI: SmiSetup,
+  HOLEY_SMI: HoleySmiSetup,
+  PACKED_DOUBLE: DoubleSetup,
+  HOLEY_DOUBLE: HoleyDoubleSetup,
+  PACKED: FastSetup,
+  HOLEY: HoleyFastSetup,
+  DICTIONARY: DictionarySetup,
 }
 
 function DefineHigherOrderTests(tests) {
   let i = 0;
   while (i < tests.length) {
-     const name = tests[i++];
-     const testFunc = tests[i++];
-     const setupFunc = tests[i++];
-     const callback = tests[i++];
+     const [name, testFunc, setupFunc, callback] = tests[i++];
 
      let setupFuncWrapper = () => {
        func = callback;
@@ -61,22 +112,23 @@ function DefineHigherOrderTests(tests) {
 }
 
 // Higher-order Array builtins.
-load('filter.js');
-load('map.js');
-load('every.js');
-load('some.js');
-load('for-each.js');
-load('reduce.js');
-load('reduce-right.js');
-load('find.js');
-load('find-index.js');
+d8.file.execute('filter.js');
+d8.file.execute('map.js');
+d8.file.execute('every.js');
+d8.file.execute('some.js');
+d8.file.execute('for-each.js');
+d8.file.execute('reduce.js');
+d8.file.execute('reduce-right.js');
+d8.file.execute('find.js');
+d8.file.execute('find-index.js');
 
 // Other Array builtins.
-load('from.js');
-load('of.js');
-load('join.js');
-load('to-string.js');
-load('slice.js');
+d8.file.execute('from.js');
+d8.file.execute('of.js');
+d8.file.execute('join.js');
+d8.file.execute('to-string.js');
+d8.file.execute('slice.js');
+d8.file.execute('copy-within.js');
 
 var success = true;
 

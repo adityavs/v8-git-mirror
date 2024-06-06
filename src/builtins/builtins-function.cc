@@ -2,16 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/builtins/builtins-utils.h"
+#include "src/api/api-inl.h"
+#include "src/builtins/builtins-utils-inl.h"
 #include "src/builtins/builtins.h"
-#include "src/code-factory.h"
-#include "src/compiler.h"
-#include "src/conversions.h"
-#include "src/counters.h"
-#include "src/lookup.h"
-#include "src/objects-inl.h"
+#include "src/codegen/code-factory.h"
+#include "src/codegen/compiler.h"
+#include "src/logging/counters.h"
+#include "src/numbers/conversions.h"
 #include "src/objects/api-callbacks.h"
-#include "src/string-builder.h"
+#include "src/objects/lookup.h"
+#include "src/objects/objects-inl.h"
+#include "src/strings/string-builder-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -31,7 +32,12 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
 
   if (!Builtins::AllowDynamicFunction(isolate, target, target_global_proxy)) {
     isolate->CountUsage(v8::Isolate::kFunctionConstructorReturnedUndefined);
-    return isolate->factory()->undefined_value();
+    // TODO(verwaest): We would like to throw using the calling context instead
+    // of the entered context but we don't currently have access to that.
+    HandleScopeImplementer* impl = isolate->handle_scope_implementer();
+    SaveAndSwitchContext save(
+        isolate, impl->LastEnteredOrMicrotaskContext()->native_context());
+    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kNoAccess), Object);
   }
 
   // Build the source string.
@@ -41,12 +47,7 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
     IncrementalStringBuilder builder(isolate);
     builder.AppendCharacter('(');
     builder.AppendCString(token);
-    if (FLAG_harmony_function_tostring) {
-      builder.AppendCString(" anonymous(");
-    } else {
-      builder.AppendCharacter('(');
-    }
-    bool parenthesis_in_arg_string = false;
+    builder.AppendCString(" anonymous(");
     if (argc > 1) {
       for (int i = 1; i < argc; ++i) {
         if (i > 1) builder.AppendCharacter(',');
@@ -55,31 +56,10 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
             isolate, param, Object::ToString(isolate, args.at(i)), Object);
         param = String::Flatten(isolate, param);
         builder.AppendString(param);
-        if (!FLAG_harmony_function_tostring) {
-          // If the formal parameters string include ) - an illegal
-          // character - it may make the combined function expression
-          // compile. We avoid this problem by checking for this early on.
-          DisallowHeapAllocation no_gc;  // Ensure vectors stay valid.
-          String::FlatContent param_content = param->GetFlatContent();
-          for (int i = 0, length = param->length(); i < length; ++i) {
-            if (param_content.Get(i) == ')') {
-              parenthesis_in_arg_string = true;
-              break;
-            }
-          }
-        }
-      }
-      if (!FLAG_harmony_function_tostring) {
-        // If the formal parameters include an unbalanced block comment, the
-        // function must be rejected. Since JavaScript does not allow nested
-        // comments we can include a trailing block comment to catch this.
-        builder.AppendCString("\n/*``*/");
       }
     }
-    if (FLAG_harmony_function_tostring) {
-      builder.AppendCharacter('\n');
-      parameters_end_pos = builder.Length();
-    }
+    builder.AppendCharacter('\n');
+    parameters_end_pos = builder.Length();
     builder.AppendCString(") {\n");
     if (argc > 0) {
       Handle<String> body;
@@ -89,13 +69,13 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
     }
     builder.AppendCString("\n})");
     ASSIGN_RETURN_ON_EXCEPTION(isolate, source, builder.Finish(), Object);
+  }
 
-    // The SyntaxError must be thrown after all the (observable) ToString
-    // conversions are done.
-    if (parenthesis_in_arg_string) {
-      THROW_NEW_ERROR(isolate,
-                      NewSyntaxError(MessageTemplate::kParenthesisInArgString),
-                      Object);
+  bool is_code_like = true;
+  for (int i = 0; i < argc; ++i) {
+    if (!args.at(i + 1)->IsCodeLike(isolate)) {
+      is_code_like = false;
+      break;
     }
   }
 
@@ -107,7 +87,7 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
         isolate, function,
         Compiler::GetFunctionFromString(
             handle(target->native_context(), isolate), source,
-            ONLY_SINGLE_FUNCTION_LITERAL, parameters_end_pos),
+            ONLY_SINGLE_FUNCTION_LITERAL, parameters_end_pos, is_code_like),
         Object);
     Handle<Object> result;
     ASSIGN_RETURN_ON_EXCEPTION(
@@ -115,7 +95,7 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
         Execution::Call(isolate, function, target_global_proxy, 0, nullptr),
         Object);
     function = Handle<JSFunction>::cast(result);
-    function->shared()->set_name_should_print_as_anonymous(true);
+    function->shared().set_name_should_print_as_anonymous(true);
   }
 
   // If new.target is equal to target then the function created
@@ -138,8 +118,10 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
     Handle<Map> map = Map::AsLanguageMode(isolate, initial_map, shared_info);
 
     Handle<Context> context(function->context(), isolate);
-    function = isolate->factory()->NewFunctionFromSharedFunctionInfo(
-        map, shared_info, context, NOT_TENURED);
+    function = Factory::JSFunctionBuilder{isolate, shared_info, context}
+                   .set_map(map)
+                   .set_allocation_type(AllocationType::kYoung)
+                   .Build();
   }
   return function;
 }
@@ -174,8 +156,8 @@ BUILTIN(AsyncFunctionConstructor) {
   // determined after the function is resumed.
   Handle<JSFunction> func = Handle<JSFunction>::cast(maybe_func);
   Handle<Script> script =
-      handle(Script::cast(func->shared()->script()), isolate);
-  int position = script->GetEvalPosition();
+      handle(Script::cast(func->shared().script()), isolate);
+  int position = Script::GetEvalPosition(isolate, script);
   USE(position);
 
   return *func;
@@ -193,8 +175,8 @@ BUILTIN(AsyncGeneratorFunctionConstructor) {
   // determined after the function is resumed.
   Handle<JSFunction> func = Handle<JSFunction>::cast(maybe_func);
   Handle<Script> script =
-      handle(Script::cast(func->shared()->script()), isolate);
-  int position = script->GetEvalPosition();
+      handle(Script::cast(func->shared().script()), isolate);
+  int position = Script::GetEvalPosition(isolate, script);
   USE(position);
 
   return *func;
@@ -202,7 +184,7 @@ BUILTIN(AsyncGeneratorFunctionConstructor) {
 
 namespace {
 
-Object* DoFunctionBind(Isolate* isolate, BuiltinArguments args) {
+Object DoFunctionBind(Isolate* isolate, BuiltinArguments args) {
   HandleScope scope(isolate);
   DCHECK_LE(1, args.length());
   if (!args.receiver()->IsCallable()) {
@@ -213,7 +195,7 @@ Object* DoFunctionBind(Isolate* isolate, BuiltinArguments args) {
   // Allocate the bound function with the given {this_arg} and {args}.
   Handle<JSReceiver> target = args.at<JSReceiver>(0);
   Handle<Object> this_arg = isolate->factory()->undefined_value();
-  ScopedVector<Handle<Object>> argv(std::max(0, args.length() - 2));
+  base::ScopedVector<Handle<Object>> argv(std::max(0, args.length() - 2));
   if (args.length() > 1) {
     this_arg = args.at(1);
     for (int i = 2; i < args.length(); ++i) {
@@ -225,8 +207,9 @@ Object* DoFunctionBind(Isolate* isolate, BuiltinArguments args) {
       isolate, function,
       isolate->factory()->NewJSBoundFunction(target, this_arg, argv));
 
-  LookupIterator length_lookup(target, isolate->factory()->length_string(),
-                               target, LookupIterator::OWN);
+  LookupIterator length_lookup(isolate, target,
+                               isolate->factory()->length_string(), target,
+                               LookupIterator::OWN);
   // Setup the "length" property based on the "length" of the {target}.
   // If the targets length is the default JSFunction accessor, we can keep the
   // accessor that's installed by default on the JSBoundFunction. It lazily
@@ -234,10 +217,10 @@ Object* DoFunctionBind(Isolate* isolate, BuiltinArguments args) {
   if (!target->IsJSFunction() ||
       length_lookup.state() != LookupIterator::ACCESSOR ||
       !length_lookup.GetAccessors()->IsAccessorInfo()) {
-    Handle<Object> length(Smi::kZero, isolate);
+    Handle<Object> length(Smi::zero(), isolate);
     Maybe<PropertyAttributes> attributes =
         JSReceiver::GetPropertyAttributes(&length_lookup);
-    if (attributes.IsNothing()) return isolate->heap()->exception();
+    if (attributes.IsNothing()) return ReadOnlyRoots(isolate).exception();
     if (attributes.FromJust() != ABSENT) {
       Handle<Object> target_length;
       ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, target_length,
@@ -247,7 +230,8 @@ Object* DoFunctionBind(Isolate* isolate, BuiltinArguments args) {
             0.0, DoubleToInteger(target_length->Number()) - argv.length()));
       }
     }
-    LookupIterator it(function, isolate->factory()->length_string(), function);
+    LookupIterator it(isolate, function, isolate->factory()->length_string(),
+                      function);
     DCHECK_EQ(LookupIterator::ACCESSOR, it.state());
     RETURN_FAILURE_ON_EXCEPTION(isolate,
                                 JSObject::DefineOwnPropertyIgnoreAttributes(
@@ -258,7 +242,8 @@ Object* DoFunctionBind(Isolate* isolate, BuiltinArguments args) {
   // If the target's name is the default JSFunction accessor, we can keep the
   // accessor that's installed by default on the JSBoundFunction. It lazily
   // computes the value from the underlying internal name.
-  LookupIterator name_lookup(target, isolate->factory()->name_string(), target);
+  LookupIterator name_lookup(isolate, target, isolate->factory()->name_string(),
+                             target);
   if (!target->IsJSFunction() ||
       name_lookup.state() != LookupIterator::ACCESSOR ||
       !name_lookup.GetAccessors()->IsAccessorInfo() ||
@@ -270,14 +255,14 @@ Object* DoFunctionBind(Isolate* isolate, BuiltinArguments args) {
     if (target_name->IsString()) {
       ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
           isolate, name,
-          Name::ToFunctionName(Handle<String>::cast(target_name)));
+          Name::ToFunctionName(isolate, Handle<String>::cast(target_name)));
       ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
           isolate, name, isolate->factory()->NewConsString(
                              isolate->factory()->bound__string(), name));
     } else {
       name = isolate->factory()->bound__string();
     }
-    LookupIterator it(function, isolate->factory()->name_string());
+    LookupIterator it(isolate, function, isolate->factory()->name_string());
     DCHECK_EQ(LookupIterator::ACCESSOR, it.state());
     RETURN_FAILURE_ON_EXCEPTION(isolate,
                                 JSObject::DefineOwnPropertyIgnoreAttributes(
@@ -303,9 +288,9 @@ BUILTIN(FunctionPrototypeToString) {
   }
   // With the revised toString behavior, all callable objects are valid
   // receivers for this method.
-  if (FLAG_harmony_function_tostring && receiver->IsJSReceiver() &&
-      JSReceiver::cast(*receiver)->map()->is_callable()) {
-    return isolate->heap()->function_native_code_string();
+  if (receiver->IsJSReceiver() &&
+      JSReceiver::cast(*receiver).map().is_callable()) {
+    return ReadOnlyRoots(isolate).function_native_code_string();
   }
   THROW_NEW_ERROR_RETURN_FAILURE(
       isolate, NewTypeError(MessageTemplate::kNotGeneric,

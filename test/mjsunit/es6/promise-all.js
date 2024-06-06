@@ -4,6 +4,8 @@
 
 // Flags: --allow-natives-syntax
 
+d8.file.execute('test/mjsunit/test-async.js');
+
 // We store the index in the hash code field of the Promise.all resolve
 // element closures, so make sure we properly handle the cases where this
 // magical field turns into a PropertyArray later.

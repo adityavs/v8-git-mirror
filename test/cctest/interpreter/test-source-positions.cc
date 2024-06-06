@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
-#include "src/api.h"
+#include "include/v8-function.h"
+#include "src/api/api-inl.h"
 #include "src/compiler/pipeline.h"
-#include "src/handles.h"
+#include "src/execution/isolate.h"
+#include "src/handles/handles.h"
+#include "src/init/v8.h"
 #include "src/interpreter/bytecode-generator.h"
 #include "src/interpreter/interpreter.h"
-#include "src/isolate.h"
-#include "src/objects-inl.h"
+#include "src/objects/objects-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/interpreter/source-position-matcher.h"
 
@@ -49,7 +49,7 @@ struct TestCaseData {
   const char* arguments() const { return arguments_; }
 
  private:
-  TestCaseData();
+  TestCaseData() = delete;
 
   const char* const script_;
   const char* const declaration_parameters_;
@@ -113,6 +113,7 @@ class OptimizedBytecodeSourcePositionTester final {
     SaveOptimizationFlags();
     saved_flag_always_opt_ = FLAG_always_opt;
     FLAG_always_opt = false;
+    FLAG_enable_lazy_source_positions = false;
   }
 
   ~OptimizedBytecodeSourcePositionTester() {
@@ -165,13 +166,14 @@ Handle<BytecodeArray> OptimizedBytecodeSourcePositionTester::MakeBytecode(
   SetOptimizationFlags(optimization_bitmap);
   CompileRun(script.c_str());
 
-  Local<Function> api_function = Local<Function>::Cast(
+  Local<Function> api_function =
       CcTest::global()
           ->Get(CcTest::isolate()->GetCurrentContext(), v8_str("test_function"))
-          .ToLocalChecked());
+          .ToLocalChecked()
+          .As<Function>();
   Handle<JSFunction> function =
       Handle<JSFunction>::cast(v8::Utils::OpenHandle(*api_function));
-  return handle(function->shared()->GetBytecodeArray(), isolate_);
+  return handle(function->shared().GetBytecodeArray(isolate_), isolate_);
 }
 
 void OptimizedBytecodeSourcePositionTester::SetOptimizationFlags(

@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/builtins/builtins-utils.h"
+#include "src/builtins/builtins-utils-inl.h"
 #include "src/builtins/builtins.h"
-#include "src/objects-inl.h"
+#include "src/logging/counters.h"
 #include "src/objects/js-collection-inl.h"
+#include "src/objects/objects-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -15,7 +16,7 @@ BUILTIN(MapPrototypeClear) {
   const char* const kMethodName = "Map.prototype.clear";
   CHECK_RECEIVER(JSMap, map, kMethodName);
   JSMap::Clear(isolate, map);
-  return isolate->heap()->undefined_value();
+  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 BUILTIN(SetPrototypeClear) {
@@ -23,7 +24,7 @@ BUILTIN(SetPrototypeClear) {
   const char* const kMethodName = "Set.prototype.clear";
   CHECK_RECEIVER(JSSet, set, kMethodName);
   JSSet::Clear(isolate, set);
-  return isolate->heap()->undefined_value();
+  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 }  // namespace internal

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-class MySelection {
+export class MySelection {
   selection: any;
   stringKey: (o: any) => string;
 
@@ -19,10 +19,9 @@ class MySelection {
     this.selection = new Map();
   }
 
-  select(s, isSelected) {
-    if (!isIterable(s)) { s = [s]; }
+  select(s: Iterable<any>, isSelected?: boolean) {
     for (const i of s) {
-      if (!i) continue;
+      if (i == undefined) continue;
       if (isSelected == undefined) {
         isSelected = !this.selection.has(this.stringKey(i));
       }
@@ -34,7 +33,7 @@ class MySelection {
     }
   }
 
-  isSelected(i): boolean {
+  isSelected(i: any): boolean {
     return this.selection.has(this.stringKey(i));
   }
 
@@ -43,21 +42,18 @@ class MySelection {
   }
 
   selectedKeys() {
-    var result = new Set();
-    for (var i of this.selection.keys()) {
+    const result = new Set();
+    for (const i of this.selection.keys()) {
       result.add(i);
     }
     return result;
   }
 
   detachSelection() {
-    var result = new Set();
-    for (var i of this.selection.keys()) {
-      result.add(i);
-    }
+    const result = this.selectedKeys();
     this.clear();
     return result;
   }
 
-  [Symbol.iterator]() { return this.selection.values() }
+  [Symbol.iterator]() { return this.selection.values(); }
 }

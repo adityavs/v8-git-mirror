@@ -25,7 +25,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "src/v8.h"
+#include "src/init/v8.h"
 
 #include "src/base/atomicops.h"
 #include "test/cctest/cctest.h"
@@ -284,6 +284,23 @@ TEST(Load) {
   TestLoadAtomic8();
   TestLoad<Atomic32>();
   TestLoad<AtomicWord>();
+}
+
+TEST(Relaxed_Memmove) {
+  constexpr size_t kLen = 6;
+  Atomic8 arr[kLen];
+  {
+    for (size_t i = 0; i < kLen; ++i) arr[i] = i;
+    Relaxed_Memmove(arr + 2, arr + 3, 2);
+    uint8_t expected[]{0, 1, 3, 4, 4, 5};
+    for (size_t i = 0; i < kLen; ++i) CHECK_EQ(arr[i], expected[i]);
+  }
+  {
+    for (size_t i = 0; i < kLen; ++i) arr[i] = i;
+    Relaxed_Memmove(arr + 3, arr + 2, 2);
+    uint8_t expected[]{0, 1, 2, 2, 3, 5};
+    for (size_t i = 0; i < kLen; ++i) CHECK_EQ(arr[i], expected[i]);
+  }
 }
 
 }  // namespace base

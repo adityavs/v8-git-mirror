@@ -27,11 +27,11 @@
 
 #include <stdlib.h>
 
-#include "src/v8.h"
-
-#include "src/api.h"
+#include "include/v8-function.h"
+#include "src/api/api-inl.h"
 #include "src/debug/liveedit.h"
-#include "src/objects-inl.h"
+#include "src/init/v8.h"
+#include "src/objects/objects-inl.h"
 #include "test/cctest/cctest.h"
 
 namespace v8 {
@@ -46,8 +46,8 @@ void CompareStringsOneWay(const char* s1, const char* s2,
   changes->clear();
   LiveEdit::CompareStrings(isolate, i_s1, i_s2, changes);
 
-  int len1 = StrLength(s1);
-  int len2 = StrLength(s2);
+  int len1 = static_cast<int>(strlen(s1));
+  int len2 = static_cast<int>(strlen(s2));
 
   int pos1 = 0;
   int pos2 = 0;
@@ -203,30 +203,34 @@ void PatchFunctions(v8::Local<v8::Context> context, const char* source_a,
                     v8::debug::LiveEditResult* result = nullptr) {
   v8::Isolate* isolate = context->GetIsolate();
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  v8::HandleScope scope(isolate);
+  v8::EscapableHandleScope scope(isolate);
   v8::Local<v8::Script> script_a =
       v8::Script::Compile(context, v8_str(isolate, source_a)).ToLocalChecked();
   script_a->Run(context).ToLocalChecked();
   i::Handle<i::Script> i_script_a(
-      i::Script::cast(v8::Utils::OpenHandle(*script_a)->shared()->script()),
+      i::Script::cast(v8::Utils::OpenHandle(*script_a)->shared().script()),
       i_isolate);
 
   if (result) {
     LiveEdit::PatchScript(
-        i_script_a, i_isolate->factory()->NewStringFromAsciiChecked(source_b),
+        i_isolate, i_script_a,
+        i_isolate->factory()->NewStringFromAsciiChecked(source_b), false,
         result);
+    if (result->status == v8::debug::LiveEditResult::COMPILE_ERROR) {
+      result->message = scope.Escape(result->message);
+    }
   } else {
     v8::debug::LiveEditResult result;
     LiveEdit::PatchScript(
-        i_script_a, i_isolate->factory()->NewStringFromAsciiChecked(source_b),
+        i_isolate, i_script_a,
+        i_isolate->factory()->NewStringFromAsciiChecked(source_b), false,
         &result);
     CHECK_EQ(result.status, v8::debug::LiveEditResult::OK);
   }
 }
 }  // anonymous namespace
 
-// TODO(kozyatinskiy): enable it with new liveedit implementation.
-DISABLED_TEST(LiveEditPatchFunctions) {
+TEST(LiveEditPatchFunctions) {
   LocalContext env;
   v8::HandleScope scope(env->GetIsolate());
   v8::Local<v8::Context> context = env.local();
@@ -244,14 +248,16 @@ DISABLED_TEST(LiveEditPatchFunctions) {
   PatchFunctions(context, "function foo() { return 1; }",
                  "function foo() { return 42; }");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "foo()")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            42);
   // It is expected, we do not reevaluate top level function.
   PatchFunctions(context, "var a = 1; function foo() { return a; }",
                  "var a = 3; function foo() { return a; }");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "foo()")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            1);
   // Throw exception since var b is not defined in original source.
@@ -266,14 +272,16 @@ DISABLED_TEST(LiveEditPatchFunctions) {
   PatchFunctions(context, "var a = 1; function foo() { return a; }",
                  "var b = 4; function foo() { var b = 5; return b; }");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "foo()")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            5);
 
   PatchFunctions(context, "var a = 1; function foo() { return a; }",
                  "var b = 4; function foo() { var a = 6; return a; }");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "foo()")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            6);
 
@@ -288,7 +296,8 @@ DISABLED_TEST(LiveEditPatchFunctions) {
   PatchFunctions(context, "var a = 1; function foo() { return a; }",
                  "var b = 1; var a = 2; function foo() { return a; }");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "foo()")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            1);
 
@@ -303,14 +312,16 @@ DISABLED_TEST(LiveEditPatchFunctions) {
   PatchFunctions(context, "function foo() { var a = 1; return a; }",
                  "function foo() { var b = 1; return b; }");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "foo()")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            1);
 
   PatchFunctions(context, "var a = 3; function foo() { var a = 1; return a; }",
                  "function foo() { var b = 1; return a; }");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "foo()")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            3);
 
@@ -326,24 +337,28 @@ DISABLED_TEST(LiveEditPatchFunctions) {
   PatchFunctions(context, "function fooArgs(a1, b1) { return a1 + b1; }",
                  "function fooArgs(a2, b2, c2) { return a2 + b2 + c2; }");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "fooArgs(1,2,3)")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            6);
 
   PatchFunctions(context, "function fooArgs(a1, b1) { return a1 + b1; }",
                  "function fooArgs(a1, b1, c1) { return a1 + b1 + c1; }");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "fooArgs(1,2,3)")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            6);
 
   i::FLAG_allow_natives_syntax = true;
   PatchFunctions(context,
                  "function foo(a, b) { return a + b; }; "
+                 "%PrepareFunctionForOptimization(foo);"
                  "%OptimizeFunctionOnNextCall(foo); foo(1,2);",
                  "function foo(a, b) { return a * b; };");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "foo(5,7)")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            35);
   i::FLAG_allow_natives_syntax = false;
@@ -355,7 +370,8 @@ DISABLED_TEST(LiveEditPatchFunctions) {
       "function foo(a,b) { function op(a,b) { return a * b } return op(a,b); "
       "}");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "foo(8,9)")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            72);
 
@@ -364,10 +380,10 @@ DISABLED_TEST(LiveEditPatchFunctions) {
                  "class Foo { constructor(a,b) { this.data = a + b; } };",
                  "class Foo { constructor(a,b) { this.data = a * b; } };");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "new Foo(4,5).data")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            20);
-
   // Change inner functions.
   PatchFunctions(
       context,
@@ -376,7 +392,8 @@ DISABLED_TEST(LiveEditPatchFunctions) {
       "function f(evt) { function f2() { return 1; } return f2() + f3(); "
       "function f3() { return 2; }  } function f4() {}");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "f()")
-               ->ToInt32(env->GetIsolate())
+               ->ToInt32(context)
+               .ToLocalChecked()
                ->Value(),
            3);
   // Change usage of outer scope.
@@ -417,10 +434,58 @@ DISABLED_TEST(LiveEditPatchFunctions) {
     v8::String::Utf8Value new_result_utf8(env->GetIsolate(), result);
     CHECK_NOT_NULL(strstr(*new_result_utf8, "cb"));
   }
+
+  // TODO(kozyatinskiy): should work when we remove (.
+  PatchFunctions(context, "f = () => 2", "f = a => a");
+  CHECK_EQ(CompileRunChecked(env->GetIsolate(), "f(3)")
+               ->ToInt32(context)
+               .ToLocalChecked()
+               ->Value(),
+           2);
+
+  // Replace function with not a function.
+  PatchFunctions(context, "f = () => 2", "f = a == 2");
+  CHECK_EQ(CompileRunChecked(env->GetIsolate(), "f(3)")
+               ->ToInt32(context)
+               .ToLocalChecked()
+               ->Value(),
+           2);
+
+  // TODO(kozyatinskiy): should work when we put function into (...).
+  PatchFunctions(context, "f = a => 2", "f = (a => 5)()");
+  CHECK_EQ(CompileRunChecked(env->GetIsolate(), "f()")
+               ->ToInt32(context)
+               .ToLocalChecked()
+               ->Value(),
+           2);
+
+  PatchFunctions(context,
+                 "f2 = null;\n"
+                 "f = () => {\n"
+                 "  f2 = () => 5;\n"
+                 "  return f2();\n"
+                 "}\n"
+                 "f()\n",
+                 "f2 = null;\n"
+                 "f = () => {\n"
+                 "  for (var a = (() => 7)(), b = 0; a < 10; ++a,++b);\n"
+                 "  return b;\n"
+                 "}\n"
+                 "f()\n");
+  // TODO(kozyatinskiy): ditto.
+  CHECK_EQ(CompileRunChecked(env->GetIsolate(), "f2()")
+               ->ToInt32(context)
+               .ToLocalChecked()
+               ->Value(),
+           5);
+  CHECK_EQ(CompileRunChecked(env->GetIsolate(), "f()")
+               ->ToInt32(context)
+               .ToLocalChecked()
+               ->Value(),
+           3);
 }
 
-// TODO(kozyatinskiy): enable it with new liveedit implementation.
-DISABLED_TEST(LiveEditCompileError) {
+TEST(LiveEditCompileError) {
   LocalContext env;
   v8::HandleScope scope(env->GetIsolate());
   v8::Local<v8::Context> context = env.local();
@@ -440,7 +505,7 @@ DISABLED_TEST(LiveEditCompileError) {
   CHECK_EQ(result.column_number, 51);
   v8::String::Utf8Value result_message(env->GetIsolate(), result.message);
   CHECK_NOT_NULL(
-      strstr(*result_message, "Uncaught SyntaxError: Unexpected token )"));
+      strstr(*result_message, "Uncaught SyntaxError: Unexpected token ')'"));
 
   {
     v8::Local<v8::String> result =
@@ -452,10 +517,8 @@ DISABLED_TEST(LiveEditCompileError) {
   PatchFunctions(context, "function foo() {}",
                  "function foo() { return a # b; }", &result);
   CHECK_EQ(result.status, debug::LiveEditResult::COMPILE_ERROR);
-  // TODO(kozyatinskiy): should be 1.
-  CHECK_EQ(result.line_number, kNoSourcePosition);
-  // TODO(kozyatinskiy): should be 26.
-  CHECK_EQ(result.column_number, kNoSourcePosition);
+  CHECK_EQ(result.line_number, 1);
+  CHECK_EQ(result.column_number, 26);
 }
 
 TEST(LiveEditFunctionExpression) {
@@ -478,11 +541,12 @@ TEST(LiveEditFunctionExpression) {
   v8::Local<v8::Function> f =
       script->Run(context).ToLocalChecked().As<v8::Function>();
   i::Handle<i::Script> i_script(
-      i::Script::cast(v8::Utils::OpenHandle(*script)->shared()->script()),
+      i::Script::cast(v8::Utils::OpenHandle(*script)->shared().script()),
       i_isolate);
   debug::LiveEditResult result;
   LiveEdit::PatchScript(
-      i_script, i_isolate->factory()->NewStringFromAsciiChecked(updated_source),
+      i_isolate, i_script,
+      i_isolate->factory()->NewStringFromAsciiChecked(updated_source), false,
       &result);
   CHECK_EQ(result.status, debug::LiveEditResult::OK);
   {

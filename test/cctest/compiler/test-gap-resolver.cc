@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/compiler/gap-resolver.h"
+#include "src/compiler/backend/gap-resolver.h"
 
 #include "src/base/utils/random-number-generator.h"
 #include "test/cctest/cctest.h"
@@ -110,8 +110,8 @@ class InterpreterState {
   };
 
   // Internally, the state is a normalized permutation of Value pairs.
-  typedef Key Value;
-  typedef std::map<Key, Value> OperandMap;
+  using Value = Key;
+  using OperandMap = std::map<Key, Value>;
 
   Value read(const InstructionOperand& op) const {
     OperandMap::const_iterator it = values_.find(KeyFor(op));
@@ -165,14 +165,12 @@ class InterpreterState {
 
   friend std::ostream& operator<<(std::ostream& os,
                                   const InterpreterState& is) {
-    for (OperandMap::const_iterator it = is.values_.begin();
-         it != is.values_.end(); ++it) {
-      if (it != is.values_.begin()) os << " ";
-      InstructionOperand source = FromKey(it->second);
-      InstructionOperand destination = FromKey(it->first);
-      MoveOperands mo(source, destination);
-      PrintableMoveOperands pmo = {GetRegConfig(), &mo};
-      os << pmo;
+    const char* space = "";
+    for (auto& value : is.values_) {
+      InstructionOperand source = FromKey(value.second);
+      InstructionOperand destination = FromKey(value.first);
+      os << space << MoveOperands{source, destination};
+      space = " ";
     }
     return os;
   }
@@ -187,14 +185,14 @@ class MoveInterpreter : public GapResolver::Assembler {
 
   void AssembleMove(InstructionOperand* source,
                     InstructionOperand* destination) override {
-    ParallelMove* moves = new (zone_) ParallelMove(zone_);
+    ParallelMove* moves = zone_->New<ParallelMove>(zone_);
     moves->AddMove(*source, *destination);
     state_.ExecuteInParallel(moves);
   }
 
   void AssembleSwap(InstructionOperand* source,
                     InstructionOperand* destination) override {
-    ParallelMove* moves = new (zone_) ParallelMove(zone_);
+    ParallelMove* moves = zone_->New<ParallelMove>(zone_);
     moves->AddMove(*source, *destination);
     moves->AddMove(*destination, *source);
     state_.ExecuteInParallel(moves);
@@ -211,7 +209,6 @@ class MoveInterpreter : public GapResolver::Assembler {
   InterpreterState state_;
 };
 
-
 class ParallelMoveCreator : public HandleAndZoneScope {
  public:
   ParallelMoveCreator() : rng_(CcTest::random_number_generator()) {}
@@ -219,7 +216,7 @@ class ParallelMoveCreator : public HandleAndZoneScope {
   // Creates a ParallelMove with 'size' random MoveOperands. Note that illegal
   // moves will be rejected, so the actual number of MoveOperands may be less.
   ParallelMove* Create(int size) {
-    ParallelMove* parallel_move = new (main_zone()) ParallelMove(main_zone());
+    ParallelMove* parallel_move = main_zone()->New<ParallelMove>(main_zone());
     // Valid ParallelMoves can't have interfering destination ops.
     std::set<InstructionOperand, CompareOperandModuloType> destinations;
     // Valid ParallelMoves can't have interfering source ops of different reps.
@@ -238,12 +235,12 @@ class ParallelMoveCreator : public HandleAndZoneScope {
       // destinations set with the float equivalents of the operand and check
       // that all destinations are unique and do not alias each other.
       if (!kSimpleFPAliasing && mo.destination().IsFPLocationOperand()) {
-        std::vector<InstructionOperand> fragments;
-        GetCanonicalOperands(dst, &fragments);
-        CHECK(!fragments.empty());
-        for (size_t i = 0; i < fragments.size(); ++i) {
-          if (destinations.find(fragments[i]) == destinations.end()) {
-            destinations.insert(fragments[i]);
+        std::vector<InstructionOperand> dst_fragments;
+        GetCanonicalOperands(dst, &dst_fragments);
+        CHECK(!dst_fragments.empty());
+        for (size_t j = 0; j < dst_fragments.size(); ++j) {
+          if (destinations.find(dst_fragments[j]) == destinations.end()) {
+            destinations.insert(dst_fragments[j]);
           } else {
             reject = true;
             break;
@@ -253,18 +250,18 @@ class ParallelMoveCreator : public HandleAndZoneScope {
         // representations.
         const InstructionOperand& src = mo.source();
         if (src.IsFPRegister()) {
-          std::vector<InstructionOperand> fragments;
+          std::vector<InstructionOperand> src_fragments;
           MachineRepresentation src_rep =
               LocationOperand::cast(src).representation();
-          GetCanonicalOperands(src, &fragments);
-          CHECK(!fragments.empty());
-          for (size_t i = 0; i < fragments.size(); ++i) {
-            auto find_it = sources.find(fragments[i]);
+          GetCanonicalOperands(src, &src_fragments);
+          CHECK(!src_fragments.empty());
+          for (size_t j = 0; j < src_fragments.size(); ++j) {
+            auto find_it = sources.find(src_fragments[j]);
             if (find_it != sources.end() && find_it->second != src_rep) {
               reject = true;
               break;
             }
-            sources.insert(std::make_pair(fragments[i], src_rep));
+            sources.insert(std::make_pair(src_fragments[j], src_rep));
           }
         }
       } else {
@@ -285,7 +282,7 @@ class ParallelMoveCreator : public HandleAndZoneScope {
   // Creates a ParallelMove from a list of operand pairs. Even operands are
   // destinations, odd ones are sources.
   ParallelMove* Create(const std::vector<InstructionOperand>& operand_pairs) {
-    ParallelMove* parallel_move = new (main_zone()) ParallelMove(main_zone());
+    ParallelMove* parallel_move = main_zone()->New<ParallelMove>(main_zone());
     for (size_t i = 0; i < operand_pairs.size(); i += 2) {
       const InstructionOperand& dst = operand_pairs[i];
       const InstructionOperand& src = operand_pairs[i + 1];
@@ -314,9 +311,9 @@ class ParallelMoveCreator : public HandleAndZoneScope {
     UNREACHABLE();
   }
 
-  // min(num_alloctable_general_registers for each arch) == 6 from
+  // min(num_alloctable_general_registers for each arch) == 5 from
   // assembler-ia32.h
-  const int kMaxIndex = 6;
+  const int kMaxIndex = 5;
   const int kMaxIndices = kMaxIndex + 1;
 
   // Non-FP slots shouldn't overlap FP slots.
@@ -355,7 +352,7 @@ class ParallelMoveCreator : public HandleAndZoneScope {
     };
     int index = rng_->NextInt(kMaxIndex);
     // destination can't be Constant.
-    switch (rng_->NextInt(is_source ? 5 : 4)) {
+    switch (rng_->NextInt(is_source ? 3 : 2)) {
       case 0:
         return AllocatedOperand(LocationOperand::STACK_SLOT, rep,
                                 GetValidSlotIndex(rep, index));
@@ -363,12 +360,6 @@ class ParallelMoveCreator : public HandleAndZoneScope {
         return AllocatedOperand(LocationOperand::REGISTER, rep,
                                 GetValidRegisterCode(rep, index));
       case 2:
-        return ExplicitOperand(LocationOperand::REGISTER, rep,
-                               GetValidRegisterCode(rep, 1));
-      case 3:
-        return ExplicitOperand(LocationOperand::STACK_SLOT, rep,
-                               GetValidSlotIndex(rep, index));
-      case 4:
         return ConstantOperand(index);
     }
     UNREACHABLE();

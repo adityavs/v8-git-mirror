@@ -27,19 +27,19 @@ function NaiveMapSetup() {
 
 // Make sure we inline the callback, pick up all possible TurboFan
 // optimizations.
-function RunOptFastMap(multiple) {
-  // Use of variable multiple in the callback function forces
+function RunOptFastMap(value) {
+  // Use of variable {value} in the callback function forces
   // context creation without escape analysis.
   //
   // Also, the arrow function requires inlining based on
   // SharedFunctionInfo.
-  result = array.map((v, i, a) =>  v + ' ' + multiple);
+  result = array.map((v, i, a) =>  v + value);
 }
 
 // Don't optimize because I want to optimize RunOptFastMap with a parameter
 // to be used in the callback.
 %NeverOptimizeFunction(OptFastMap);
-function OptFastMap() { RunOptFastMap(3); }
+function OptFastMap() { RunOptFastMap(" 3"); }
 
 function side_effect(a) { return a; }
 %NeverOptimizeFunction(side_effect);
@@ -49,15 +49,15 @@ function OptUnreliableMap() {
 
 DefineHigherOrderTests([
   // name, test function, setup function, user callback
-  "NaiveMapReplacement", NaiveMap, NaiveMapSetup, v => v,
-  "SmiMap", mc("map"), SmiSetup, v => v,
-  "DoubleMap", mc("map"), DoubleSetup, v => v,
-  "FastMap", mc("map"), FastSetup, v => v,
-  "SmallSmiToDoubleMap", mc("map"), SmiSetup, v => v + 0.5,
-  "SmallSmiToFastMap", mc("map"), SmiSetup, v => "hi" + v,
-  "GenericMap", mc("map", true), ObjectSetup, v => v,
-  "OptFastMap", OptFastMap, FastSetup, undefined,
-  "OptUnreliableMap", OptUnreliableMap, FastSetup, v => v
+  ['NaiveMapReplacement', NaiveMap, NaiveMapSetup, v => v],
+  ['SmiMap', newClosure('map'), SmiSetup, v => v],
+  ['DoubleMap', newClosure('map'), DoubleSetup, v => v],
+  ['FastMap', newClosure('map'), FastSetup, v => v],
+  ['SmallSmiToDoubleMap', newClosure('map'), SmiSetup, v => v + 0.5],
+  ['SmallSmiToFastMap', newClosure('map'), SmiSetup, v => 'hi' + v],
+  ['GenericMap', newClosure('map', true), ObjectSetup, v => v],
+  ['OptFastMap', OptFastMap, FastSetup, undefined],
+  ['OptUnreliableMap', OptUnreliableMap, FastSetup, v => v]
 ]);
 
 })();

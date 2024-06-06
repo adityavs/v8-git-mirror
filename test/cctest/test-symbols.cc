@@ -30,11 +30,11 @@
 // of ConsStrings.  These operations may not be very fast, but they
 // should be possible without getting errors due to too deep recursion.
 
+#include "src/execution/isolate.h"
 #include "src/heap/factory.h"
-#include "src/isolate.h"
-#include "src/objects.h"
 #include "src/objects/name-inl.h"
-#include "src/ostreams.h"
+#include "src/utils/ostreams.h"
+#include "src/objects/objects.h"
 #include "test/cctest/cctest.h"
 
 namespace v8 {
@@ -54,10 +54,11 @@ TEST(Create) {
     CHECK(symbols[i]->IsName());
     CHECK(symbols[i]->IsSymbol());
     CHECK(symbols[i]->HasHashCode());
-    CHECK_GT(symbols[i]->Hash(), 0u);
+    CHECK(symbols[i]->IsUniqueName());
+    CHECK_GT(symbols[i]->hash(), 0u);
     os << Brief(*symbols[i]) << "\n";
 #if OBJECT_PRINT
-    symbols[i]->Print(isolate, os);
+    symbols[i]->Print(os);
 #endif
 #if VERIFY_HEAP
     symbols[i]->ObjectVerify(isolate);
